@@ -3,19 +3,27 @@ import cors from "cors";
 import fetch from "node-fetch";
 
 const app = express();
-
 app.use(cors());
 app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
 const GEOAPIFY_KEY = process.env.GEOAPIFY_KEY || "PON_AQUI_TU_API_KEY";
 
-// Página principal para comprobar que Render funciona
 app.get("/", (req, res) => {
   res.send("Backend InmoRecursos funcionando correctamente");
 });
 
-// Endpoint principal
+async function getJson(url, options = {}) {
+  const response = await fetch(url, options);
+  const text = await response.text();
+
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error("Una API externa no ha devuelto JSON válido. Respuesta recibida: " + text.slice(0, 120));
+  }
+}
+
 app.post("/analizar-entorno", async (req, res) => {
   try {
     const direccion = req.body.direccion;
@@ -28,17 +36,15 @@ app.post("/analizar-entorno", async (req, res) => {
       });
     }
 
-    // 1. Geocodificar dirección
-    const geoUrl = `https://nominatim.openstreetmap.org/search?format=jsonv2&limit=1&q=${encodeURIComponent(direccion)}`;
+    const geoUrl =
+      `https://nominatim.openstreetmap.org/search?format=jsonv2&limit=1&q=${encodeURIComponent(direccion)}`;
 
-    const geoRes = await fetch(geoUrl, {
+    const geoData = await getJson(geoUrl, {
       headers: {
         "Accept": "application/json",
-        "User-Agent": "InmoRecursos/1.0"
+        "User-Agent": "InmoRecursos/1.0 contacto@inmorecursos.com"
       }
     });
-
-    const geoData = await geoRes.json();
 
     if (!Array.isArray(geoData) || geoData.length === 0) {
       return res.status(404).json({
@@ -50,21 +56,27 @@ app.post("/analizar-entorno", async (req, res) => {
     const lat = Number(geoData[0].lat);
     const lon = Number(geoData[0].lon);
 
-    // 2. Calidad del aire, UV y polen
     const airUrl =
       `https://air-quality-api.open-meteo.com/v1/air-quality` +
       `?latitude=${lat}` +
       `&longitude=${lon}` +
-      `&current=pm2_5,pm10,european_aqi,uv_index,alder_pollen,birch_pollen,grass_pollen,mugwort_pollen,olive_pollen,ragweed_pollen` +
+      `&current=pm2_5,pm10,european_aqi,alder_pollen,birch_pollen,grass_pollen,mugwort_pollen,olive_pollen,ragweed_pollen` +
       `&timezone=auto` +
       `&domains=cams_europe`;
 
-    const airRes = await fetch(airUrl);
-    const airData = await airRes.json();
-
+    const airData = await getJson(airUrl);
     const current = airData.current || {};
 
-    // 3. Servicios cercanos Geoapify
+    const uvUrl =
+      `https://api.open-meteo.com/v1/forecast` +
+      `?latitude=${lat}` +
+      `&longitude=${lon}` +
+      `&current=uv_index` +
+      `&timezone=auto`;
+
+    const uvData = await getJson(uvUrl);
+    const uvCurrent = uvData.current || {};
+
     let servicios = [];
     let serviciosResumen = {
       supermercados: 0,
@@ -95,9 +107,7 @@ app.post("/analizar-entorno", async (req, res) => {
         `&limit=30` +
         `&apiKey=${encodeURIComponent(GEOAPIFY_KEY)}`;
 
-      const servRes = await fetch(servicesUrl);
-      const servData = await servRes.json();
-
+      const servData = await getJson(servicesUrl);
       const features = Array.isArray(servData.features) ? servData.features : [];
 
       servicios = features.map((f) => {
@@ -121,21 +131,17 @@ app.post("/analizar-entorno", async (req, res) => {
       });
     }
 
-    // 4. Respuesta final limpia
     return res.json({
       ok: true,
       direccion_solicitada: direccion,
       direccion_localizada: geoData[0].display_name || direccion,
-      coordenadas: {
-        lat,
-        lon
-      },
+      coordenadas: { lat, lon },
       radio_consultado_m: radio,
       aire: {
         pm2_5: current.pm2_5 ?? null,
         pm10: current.pm10 ?? null,
         aqi_europeo: current.european_aqi ?? null,
-        uv: current.uv_index ?? null
+        uv: uvCurrent.uv_index ?? null
       },
       polen: {
         alder: current.alder_pollen ?? null,
