@@ -7,21 +7,69 @@ app.use(cors());
 app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
-const GEOAPIFY_KEY = process.env.GEOAPIFY_KEY || "PON_AQUI_TU_API_KEY";
+const GEOAPIFY_KEY = process.env.GEOAPIFY_KEY || "";
 
-app.get("/", (req, res) => {
+app.get("/", (_req, res) => {
   res.send("Backend InmoRecursos funcionando correctamente");
 });
 
-async function getJson(url, options = {}) {
+async function getJson(nombre, url, options = {}) {
   const response = await fetch(url, options);
   const text = await response.text();
 
   try {
     return JSON.parse(text);
   } catch {
-    throw new Error("Una API externa no ha devuelto JSON válido. Respuesta recibida: " + text.slice(0, 120));
+    throw new Error(
+      `${nombre} no ha devuelto JSON válido. Código HTTP: ${response.status}. Respuesta: ${text.slice(0, 180)}`
+    );
   }
+}
+
+async function geocode(direccion) {
+  // Preferente: Geoapify si hay API key
+  if (GEOAPIFY_KEY) {
+    const url =
+      `https://api.geoapify.com/v1/geocode/search` +
+      `?text=${encodeURIComponent(direccion)}` +
+      `&limit=1` +
+      `&apiKey=${encodeURIComponent(GEOAPIFY_KEY)}`;
+
+    const data = await getJson("Geoapify Geocoding", url);
+
+    const f = data.features?.[0];
+    if (!f) throw new Error("Dirección no encontrada en Geoapify.");
+
+    return {
+      lat: Number(f.properties.lat),
+      lon: Number(f.properties.lon),
+      display_name: f.properties.formatted || direccion
+    };
+  }
+
+  // Alternativa: Nominatim
+  const url =
+    `https://nominatim.openstreetmap.org/search` +
+    `?format=json` +
+    `&limit=1` +
+    `&q=${encodeURIComponent(direccion)}`;
+
+  const data = await getJson("Nominatim", url, {
+    headers: {
+      "Accept": "application/json",
+      "User-Agent": "InmoRecursos/1.0"
+    }
+  });
+
+  if (!Array.isArray(data) || !data.length) {
+    throw new Error("Dirección no encontrada en Nominatim.");
+  }
+
+  return {
+    lat: Number(data[0].lat),
+    lon: Number(data[0].lon),
+    display_name: data[0].display_name || direccion
+  };
 }
 
 app.post("/analizar-entorno", async (req, res) => {
@@ -36,25 +84,8 @@ app.post("/analizar-entorno", async (req, res) => {
       });
     }
 
-    const geoUrl =
-      `https://nominatim.openstreetmap.org/search?format=jsonv2&limit=1&q=${encodeURIComponent(direccion)}`;
-
-    const geoData = await getJson(geoUrl, {
-      headers: {
-        "Accept": "application/json",
-        "User-Agent": "InmoRecursos/1.0 contacto@inmorecursos.com"
-      }
-    });
-
-    if (!Array.isArray(geoData) || geoData.length === 0) {
-      return res.status(404).json({
-        ok: false,
-        error: "Dirección no encontrada."
-      });
-    }
-
-    const lat = Number(geoData[0].lat);
-    const lon = Number(geoData[0].lon);
+    const geo = await geocode(direccion);
+    const { lat, lon } = geo;
 
     const airUrl =
       `https://air-quality-api.open-meteo.com/v1/air-quality` +
@@ -64,7 +95,7 @@ app.post("/analizar-entorno", async (req, res) => {
       `&timezone=auto` +
       `&domains=cams_europe`;
 
-    const airData = await getJson(airUrl);
+    const airData = await getJson("Open-Meteo Air Quality", airUrl);
     const current = airData.current || {};
 
     const uvUrl =
@@ -74,7 +105,7 @@ app.post("/analizar-entorno", async (req, res) => {
       `&current=uv_index` +
       `&timezone=auto`;
 
-    const uvData = await getJson(uvUrl);
+    const uvData = await getJson("Open-Meteo UV", uvUrl);
     const uvCurrent = uvData.current || {};
 
     let servicios = [];
@@ -88,7 +119,7 @@ app.post("/analizar-entorno", async (req, res) => {
       transporte: 0
     };
 
-    if (GEOAPIFY_KEY && GEOAPIFY_KEY !== "PON_AQUI_TU_API_KEY") {
+    if (GEOAPIFY_KEY) {
       const categories = [
         "commercial.supermarket",
         "healthcare.pharmacy",
@@ -107,7 +138,7 @@ app.post("/analizar-entorno", async (req, res) => {
         `&limit=30` +
         `&apiKey=${encodeURIComponent(GEOAPIFY_KEY)}`;
 
-      const servData = await getJson(servicesUrl);
+      const servData = await getJson("Geoapify Places", servicesUrl);
       const features = Array.isArray(servData.features) ? servData.features : [];
 
       servicios = features.map((f) => {
@@ -134,7 +165,7 @@ app.post("/analizar-entorno", async (req, res) => {
     return res.json({
       ok: true,
       direccion_solicitada: direccion,
-      direccion_localizada: geoData[0].display_name || direccion,
+      direccion_localizada: geo.display_name,
       coordenadas: { lat, lon },
       radio_consultado_m: radio,
       aire: {
@@ -156,7 +187,7 @@ app.post("/analizar-entorno", async (req, res) => {
     });
 
   } catch (error) {
-    console.error("Error en /analizar-entorno:", error);
+    console.error("Error:", error);
 
     return res.status(500).json({
       ok: false,
