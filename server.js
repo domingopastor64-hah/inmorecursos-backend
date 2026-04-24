@@ -9,12 +9,12 @@ app.use(express.json());
 const PORT = process.env.PORT || 3000;
 const GEOAPIFY_KEY = process.env.GEOAPIFY_KEY || "";
 
-// 🔵 Comprobación rápida
+// 🔵 Test
 app.get("/", (req, res) => {
   res.send("Backend InmoRecursos funcionando correctamente");
 });
 
-// 🔵 Función segura para obtener JSON
+// 🔵 fetch seguro
 async function getJson(nombre, url) {
   const response = await fetch(url);
   const text = await response.text();
@@ -22,18 +22,12 @@ async function getJson(nombre, url) {
   try {
     return JSON.parse(text);
   } catch {
-    throw new Error(
-      `${nombre} no ha devuelto JSON válido. Código ${response.status}.`
-    );
+    throw new Error(`${nombre} no devuelve JSON válido`);
   }
 }
 
-// 🔵 Geocodificación SOLO España
+// 🔵 Geocode España
 async function geocode(direccion) {
-  if (!GEOAPIFY_KEY) {
-    throw new Error("Falta GEOAPIFY_KEY en Render");
-  }
-
   const url =
     `https://api.geoapify.com/v1/geocode/search` +
     `?text=${encodeURIComponent(direccion)}` +
@@ -42,136 +36,129 @@ async function geocode(direccion) {
     `&limit=1` +
     `&apiKey=${GEOAPIFY_KEY}`;
 
-  const data = await getJson("Geoapify Geocoding", url);
+  const data = await getJson("Geoapify", url);
 
   const f = data.features?.[0];
-  if (!f) throw new Error("Dirección no encontrada en España.");
+  if (!f) throw new Error("Dirección no encontrada");
 
   return {
     lat: Number(f.properties.lat),
     lon: Number(f.properties.lon),
-    display_name: f.properties.formatted || direccion
+    display_name: f.properties.formatted
   };
 }
 
-// 🔵 Endpoint principal
+// 🔵 SCORING
+function calcularScoring(aire, servicios) {
+
+  let scoreAire = 10;
+
+  if (aire.pm2_5 > 25) scoreAire = 3;
+  else if (aire.pm2_5 > 15) scoreAire = 6;
+
+  let scoreServicios = Math.min(
+    10,
+    (servicios.supermercados +
+     servicios.farmacias +
+     servicios.colegios +
+     servicios.hospitales) / 2
+  );
+
+  let scoreUV = aire.uv > 7 ? 5 : 8;
+
+  const scoreFinal = (
+    scoreAire * 0.4 +
+    scoreServicios * 0.4 +
+    scoreUV * 0.2
+  );
+
+  let color = "verde";
+  if (scoreFinal < 5) color = "rojo";
+  else if (scoreFinal < 7) color = "naranja";
+
+  return {
+    score: Number(scoreFinal.toFixed(1)),
+    color,
+    lectura:
+      color === "verde"
+        ? "Entorno favorable para vivir"
+        : color === "naranja"
+        ? "Entorno aceptable con matices"
+        : "Entorno con condicionantes"
+  };
+}
+
+// 🔵 ENDPOINT
 app.post("/analizar-entorno", async (req, res) => {
   try {
-    const direccion = req.body.direccion;
-    const radio = Number(req.body.radio || 1000);
-
-    if (!direccion) {
-      return res.status(400).json({
-        ok: false,
-        error: "Debe indicar una dirección."
-      });
-    }
+    const { direccion, radio = 1000 } = req.body;
 
     const geo = await geocode(direccion);
     const { lat, lon } = geo;
 
-    // 🔵 Calidad del aire
-    const airUrl =
-      `https://air-quality-api.open-meteo.com/v1/air-quality` +
-      `?latitude=${lat}` +
-      `&longitude=${lon}` +
-      `&current=pm2_5,pm10,european_aqi,alder_pollen,birch_pollen,grass_pollen,mugwort_pollen,olive_pollen,ragweed_pollen` +
-      `&timezone=auto` +
-      `&domains=cams_europe`;
+    // Aire
+    const airData = await getJson(
+      "Aire",
+      `https://air-quality-api.open-meteo.com/v1/air-quality?latitude=${lat}&longitude=${lon}&current=pm2_5,pm10,european_aqi&timezone=auto`
+    );
 
-    const airData = await getJson("Open-Meteo Air", airUrl);
-    const current = airData.current || {};
+    const aire = {
+      pm2_5: airData.current.pm2_5,
+      pm10: airData.current.pm10,
+      aqi: airData.current.european_aqi
+    };
 
-    // 🔵 UV
-    const uvUrl =
-      `https://api.open-meteo.com/v1/forecast` +
-      `?latitude=${lat}` +
-      `&longitude=${lon}` +
-      `&current=uv_index` +
-      `&timezone=auto`;
+    // UV
+    const uvData = await getJson(
+      "UV",
+      `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current=uv_index&timezone=auto`
+    );
 
-    const uvData = await getJson("Open-Meteo UV", uvUrl);
-    const uvCurrent = uvData.current || {};
+    aire.uv = uvData.current.uv_index;
 
-    // 🔵 Servicios cercanos
-    const categories = [
-      "commercial.supermarket",
-      "healthcare.pharmacy",
-      "education.school",
-      "healthcare.hospital",
-      "catering.restaurant",
-      "leisure.park",
-      "public_transport"
-    ].join(",");
-
-    const servicesUrl =
-      `https://api.geoapify.com/v2/places` +
-      `?categories=${encodeURIComponent(categories)}` +
-      `&filter=${encodeURIComponent(`circle:${lon},${lat},${radio}`)}` +
-      `&bias=${encodeURIComponent(`proximity:${lon},${lat}`)}` +
-      `&limit=30` +
-      `&apiKey=${GEOAPIFY_KEY}`;
-
-    const servData = await getJson("Geoapify Places", servicesUrl);
-    const features = Array.isArray(servData.features) ? servData.features : [];
+    // Servicios
+    const servData = await getJson(
+      "Servicios",
+      `https://api.geoapify.com/v2/places?categories=commercial.supermarket,healthcare.pharmacy,education.school,healthcare.hospital&filter=circle:${lon},${lat},${radio}&limit=20&apiKey=${GEOAPIFY_KEY}`
+    );
 
     let resumen = {
       supermercados: 0,
       farmacias: 0,
       colegios: 0,
-      hospitales: 0,
-      restaurantes: 0,
-      parques: 0,
-      transporte: 0
+      hospitales: 0
     };
 
-    const servicios = features.map(f => {
-      const p = f.properties || {};
-      const cat = p.categories || [];
+    const servicios = servData.features.map(f => {
+      const cat = f.properties.categories;
 
       if (cat.includes("commercial.supermarket")) resumen.supermercados++;
       if (cat.includes("healthcare.pharmacy")) resumen.farmacias++;
       if (cat.includes("education.school")) resumen.colegios++;
       if (cat.includes("healthcare.hospital")) resumen.hospitales++;
-      if (cat.includes("catering.restaurant")) resumen.restaurantes++;
-      if (cat.includes("leisure.park")) resumen.parques++;
-      if (cat.includes("public_transport")) resumen.transporte++;
 
       return {
-        nombre: p.name || "Servicio",
-        direccion: p.address_line1 || ""
+        nombre: f.properties.name || "Servicio"
       };
     });
 
-    // 🔵 RESPUESTA FINAL
+    // 🔥 SCORING
+    const scoring = calcularScoring(aire, resumen);
+
     res.json({
       ok: true,
-      direccion_solicitada: direccion,
-      direccion_localizada: geo.display_name,
-      coordenadas: { lat, lon },
-      aire: {
-        pm2_5: current.pm2_5,
-        pm10: current.pm10,
-        aqi: current.european_aqi,
-        uv: uvCurrent.uv_index
-      },
-      polen: {
-        grass: current.grass_pollen,
-        olive: current.olive_pollen
-      },
+      direccion: geo.display_name,
+      aire,
       servicios_resumen: resumen,
-      servicios
+      scoring
     });
 
-  } catch (error) {
+  } catch (e) {
     res.status(500).json({
       ok: false,
-      error: "Error interno del servidor",
-      detalle: error.message
+      error: e.message
     });
   }
 });
 
-app.listen(PORT, () => {
-  console.log("Servidor funcionando");
-});
+app.listen(PORT, () => console.log("Servidor activo"));
