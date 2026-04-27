@@ -45,20 +45,15 @@ function normalizarTexto(v = "") {
 function cacheGet(key) {
   const item = cache.get(key);
   if (!item) return null;
-
   if (Date.now() - item.time > CACHE_TTL_MS) {
     cache.delete(key);
     return null;
   }
-
   return item.value;
 }
 
 function cacheSet(key, value) {
-  cache.set(key, {
-    time: Date.now(),
-    value
-  });
+  cache.set(key, { time: Date.now(), value });
 }
 
 async function fetchText(url, options = {}) {
@@ -98,17 +93,41 @@ async function fetchJson(url, options = {}) {
   }
 }
 
+/* Convierte cualquier respuesta INE en array de series */
+function toSeriesArray(raw) {
+  const out = [];
+
+  function walk(x) {
+    if (!x) return;
+
+    if (Array.isArray(x)) {
+      x.forEach(walk);
+      return;
+    }
+
+    if (typeof x === "object") {
+      if (x.Nombre && Array.isArray(x.Data)) {
+        out.push(x);
+        return;
+      }
+
+      Object.values(x).forEach(walk);
+    }
+  }
+
+  walk(raw);
+  return out;
+}
+
 function cargarMunicipiosLocales() {
   const filePath = path.join(__dirname, "municipios.json");
 
-  if (!fs.existsSync(filePath)) {
-    return [];
-  }
+  if (!fs.existsSync(filePath)) return [];
 
   try {
     const raw = fs.readFileSync(filePath, "utf8");
     return JSON.parse(raw);
-  } catch (e) {
+  } catch {
     return [];
   }
 }
@@ -144,23 +163,15 @@ function resolveCodigoINELocal(municipio, provincia, advertencias = []) {
   }
 
   if (!encontrados.length) {
-    advertencias.push(
-      `No se ha encontrado código INE local para "${municipio || "municipio no identificado"}". Añada ese municipio a municipios.json.`
-    );
+    advertencias.push(`No se ha encontrado código INE local para "${municipio}". Añádalo a municipios.json.`);
     return null;
-  }
-
-  if (encontrados.length > 1) {
-    advertencias.push(`Se han encontrado varios códigos INE para "${municipio}". Se usa el primero.`);
   }
 
   return encontrados[0].codigo_ine || null;
 }
 
 async function geocodeAddress(direccion) {
-  if (!GEOAPIFY_KEY) {
-    throw new Error("Falta GEOAPIFY_KEY en Render.");
-  }
+  if (!GEOAPIFY_KEY) throw new Error("Falta GEOAPIFY_KEY en Render.");
 
   const url =
     `${GEOAPIFY_GEOCODE}?text=${encodeURIComponent(direccion)}` +
@@ -169,9 +180,7 @@ async function geocodeAddress(direccion) {
   const data = await fetchJson(url);
   const f = data.features?.[0];
 
-  if (!f) {
-    throw new Error("No se ha podido geolocalizar la dirección.");
-  }
+  if (!f) throw new Error("No se ha podido geolocalizar la dirección.");
 
   const p = f.properties || {};
 
@@ -187,18 +196,14 @@ async function geocodeAddress(direccion) {
 
 async function ineTable(tableId, nult = 1) {
   const url = `${INE.base}/DATOS_TABLA/${tableId}?nult=${nult}&tip=A`;
-  return await fetchJson(url);
+  const raw = await fetchJson(url);
+  return toSeriesArray(raw);
 }
 
 function latestValue(series) {
   const data = Array.isArray(series?.Data) ? series.Data : [];
 
-  if (!data.length) {
-    return {
-      valor: null,
-      fecha: null
-    };
-  }
+  if (!data.length) return { valor: null, fecha: null };
 
   const sorted = [...data].sort((a, b) => Number(b.Fecha || 0) - Number(a.Fecha || 0));
   const first = sorted[0];
@@ -210,10 +215,11 @@ function latestValue(series) {
 }
 
 function findSeriesByText(seriesList, requiredTerms = [], excludedTerms = []) {
+  const safeList = Array.isArray(seriesList) ? seriesList : [];
   const req = requiredTerms.map(normalizarTexto).filter(Boolean);
   const exc = excludedTerms.map(normalizarTexto).filter(Boolean);
 
-  return (seriesList || []).filter((s) => {
+  return safeList.filter((s) => {
     const name = normalizarTexto(s.Nombre || "");
     return req.every((t) => name.includes(t)) && !exc.some((t) => name.includes(t));
   });
@@ -221,23 +227,17 @@ function findSeriesByText(seriesList, requiredTerms = [], excludedTerms = []) {
 
 function pickValue(seriesList, requiredTerms = [], excludedTerms = []) {
   const series = findSeriesByText(seriesList, requiredTerms, excludedTerms);
-
-  if (!series.length) {
-    return {
-      valor: null,
-      fecha: null
-    };
-  }
-
+  if (!series.length) return { valor: null, fecha: null };
   return latestValue(series[0]);
 }
 
 function filterSeriesByGeo(seriesList, codigoIne, municipio, provincia) {
+  const safeList = Array.isArray(seriesList) ? seriesList : [];
   const mun = normalizarTexto(municipio || "");
   const prov = normalizarTexto(provincia || "");
   const code = String(codigoIne || "");
 
-  return (seriesList || []).filter((s) => {
+  return safeList.filter((s) => {
     const name = normalizarTexto(s.Nombre || "");
 
     return (
@@ -277,7 +277,6 @@ async function getRentaINE(ctx, advertencias) {
     };
   } catch (e) {
     advertencias.push("No se pudo consultar renta INE: " + e.message);
-
     return {
       renta_media_persona: null,
       renta_media_hogar: null,
@@ -316,7 +315,6 @@ async function getPoblacionINE(ctx, advertencias) {
     };
   } catch (e) {
     advertencias.push("No se pudo consultar población INE: " + e.message);
-
     return {
       poblacion_total: null,
       hombres: null,
@@ -353,7 +351,6 @@ async function getEducacionINE(ctx, advertencias) {
     };
   } catch (e) {
     advertencias.push("No se pudo consultar educación INE: " + e.message);
-
     return {
       estudios_superiores: null,
       estudios_secundarios: null,
@@ -386,7 +383,6 @@ async function getActividadINE(ctx, advertencias) {
     };
   } catch (e) {
     advertencias.push("No se pudo consultar actividad INE: " + e.message);
-
     return {
       poblacion_activa: null,
       ocupados: null,
@@ -419,7 +415,6 @@ async function getCompraventasINE(ctx, advertencias) {
     };
   } catch (e) {
     advertencias.push("No se pudo consultar compraventas INE: " + e.message);
-
     return {
       compraventas_total: null,
       compraventas_vivienda_nueva: null,
@@ -441,10 +436,7 @@ async function getAirAndUV(lat, lon, advertencias) {
       `${OPEN_METEO_FORECAST}?latitude=${lat}&longitude=${lon}` +
       `&daily=uv_index_max,uv_index_clear_sky_max&current=temperature_2m,relative_humidity_2m,wind_speed_10m&timezone=auto`;
 
-    const [air, uv] = await Promise.all([
-      fetchJson(airUrl),
-      fetchJson(uvUrl)
-    ]);
+    const [air, uv] = await Promise.all([fetchJson(airUrl), fetchJson(uvUrl)]);
 
     const firstValid = (arr) =>
       Array.isArray(arr)
@@ -473,12 +465,7 @@ async function getAirAndUV(lat, lon, advertencias) {
     };
   } catch (e) {
     advertencias.push("No se pudo consultar Open-Meteo: " + e.message);
-
-    return {
-      aire: {},
-      radiacion: {},
-      meteo: {}
-    };
+    return { aire: {}, radiacion: {}, meteo: {} };
   }
 }
 
@@ -492,9 +479,7 @@ async function getAemetUvi(advertencias) {
     const url = `https://opendata.aemet.es/opendata/api/prediccion/especifica/uvi/0/?api_key=${AEMET_KEY}`;
     const meta = await fetchJson(url);
 
-    if (!meta.datos) {
-      throw new Error("AEMET no devolvió URL de datos.");
-    }
+    if (!meta.datos) throw new Error("AEMET no devolvió URL de datos.");
 
     return await fetchJson(meta.datos);
   } catch (e) {
@@ -504,9 +489,7 @@ async function getAemetUvi(advertencias) {
 }
 
 async function getPlaces(lat, lon, radio, advertencias) {
-  if (!GEOAPIFY_KEY) {
-    throw new Error("Falta GEOAPIFY_KEY.");
-  }
+  if (!GEOAPIFY_KEY) throw new Error("Falta GEOAPIFY_KEY.");
 
   try {
     const categories = [
@@ -530,7 +513,6 @@ async function getPlaces(lat, lon, radio, advertencias) {
 
     const servicios = (data.features || []).map((f) => {
       const p = f.properties || {};
-
       return {
         nombre: p.name || p.address_line1 || null,
         tipo: Array.isArray(p.categories) ? p.categories[0] : null,
@@ -555,7 +537,6 @@ async function getPlaces(lat, lon, radio, advertencias) {
     };
   } catch (e) {
     advertencias.push("No se pudieron consultar servicios Geoapify: " + e.message);
-
     return {
       servicios_resumen: {},
       servicios_con_direccion: [],
@@ -567,7 +548,6 @@ async function getPlaces(lat, lon, radio, advertencias) {
 
 function parseOptionalNumber(value) {
   if (value === null || value === undefined || value === "") return null;
-
   const n = Number(value);
   return Number.isFinite(n) ? n : null;
 }
@@ -617,11 +597,7 @@ app.get("/", (req, res) => {
   res.json({
     ok: true,
     servicio: "InmoRecursos backend real",
-    endpoints: [
-      "/demografia?direccion=",
-      "/entorno?direccion=&radio=500",
-      "POST /ctr"
-    ]
+    endpoints: ["/demografia?direccion=", "/entorno?direccion=&radio=500", "POST /ctr"]
   });
 });
 
@@ -629,10 +605,7 @@ app.get("/demografia", async (req, res) => {
   const direccion = req.query.direccion;
 
   if (!direccion) {
-    return res.status(400).json({
-      ok: false,
-      error: "Falta direccion."
-    });
+    return res.status(400).json({ ok: false, error: "Falta direccion." });
   }
 
   const advertencias = [];
@@ -682,35 +655,12 @@ app.get("/demografia", async (req, res) => {
       educacion,
       actividad,
       fuentes: [
-        {
-          nombre: "INE - Relación local municipios.json",
-          nivel: "municipio"
-        },
-        {
-          nombre: "INE - DATOS_TABLA 30896",
-          contenido: "renta",
-          nivel: "según disponibilidad"
-        },
-        {
-          nombre: "INE - DATOS_TABLA 68532",
-          contenido: "población",
-          nivel: "según disponibilidad"
-        },
-        {
-          nombre: "INE - DATOS_TABLA 66620",
-          contenido: "educación",
-          nivel: "según disponibilidad"
-        },
-        {
-          nombre: "INE - DATOS_TABLA 67079",
-          contenido: "actividad",
-          nivel: "según disponibilidad"
-        },
-        {
-          nombre: "INE - DATOS_TABLA 6150",
-          contenido: "compraventas",
-          nivel: "provincia"
-        }
+        { nombre: "INE - Relación local municipios.json", nivel: "municipio" },
+        { nombre: "INE - DATOS_TABLA 30896", contenido: "renta", nivel: "según disponibilidad" },
+        { nombre: "INE - DATOS_TABLA 68532", contenido: "población", nivel: "según disponibilidad" },
+        { nombre: "INE - DATOS_TABLA 66620", contenido: "educación", nivel: "según disponibilidad" },
+        { nombre: "INE - DATOS_TABLA 67079", contenido: "actividad", nivel: "según disponibilidad" },
+        { nombre: "INE - DATOS_TABLA 6150", contenido: "compraventas", nivel: "provincia" }
       ],
       advertencias
     });
@@ -729,10 +679,7 @@ app.get("/entorno", async (req, res) => {
   const advertencias = [];
 
   if (!direccion) {
-    return res.status(400).json({
-      ok: false,
-      error: "Falta direccion."
-    });
+    return res.status(400).json({ ok: false, error: "Falta direccion." });
   }
 
   try {
@@ -776,11 +723,7 @@ app.get("/entorno", async (req, res) => {
 app.post("/ctr", (req, res) => {
   try {
     const ctr = calcularCTR(req.body || {});
-
-    res.json({
-      ok: true,
-      ctr
-    });
+    res.json({ ok: true, ctr });
   } catch (e) {
     res.status(500).json({
       ok: false,
