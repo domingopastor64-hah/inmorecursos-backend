@@ -88,12 +88,18 @@ async function fetchJson(url, options = {}) {
 
   try {
     return JSON.parse(text);
-  } catch (e) {
+  } catch {
     throw new Error(`JSON no válido recibido desde: ${url}`);
   }
 }
 
-/* Convierte cualquier respuesta INE en array de series */
+function toArray(raw) {
+  if (!raw) return [];
+  if (Array.isArray(raw)) return raw;
+  if (typeof raw === "object") return Object.values(raw).flatMap(toArray);
+  return [];
+}
+
 function toSeriesArray(raw) {
   const out = [];
 
@@ -121,7 +127,6 @@ function toSeriesArray(raw) {
 
 function cargarMunicipiosLocales() {
   const filePath = path.join(__dirname, "municipios.json");
-
   if (!fs.existsSync(filePath)) return [];
 
   try {
@@ -194,18 +199,16 @@ async function geocodeAddress(direccion) {
   };
 }
 
-async function ineTable(tableId, nult = 1) {
-  const url = `${INE.base}/DATOS_TABLA/${tableId}?nult=${nult}&tip=A`;
-  const raw = await fetchJson(url);
-  return toSeriesArray(raw);
-}
-
 function latestValue(series) {
   const data = Array.isArray(series?.Data) ? series.Data : [];
-
   if (!data.length) return { valor: null, fecha: null };
 
-  const sorted = [...data].sort((a, b) => Number(b.Fecha || 0) - Number(a.Fecha || 0));
+  const sorted = [...data].sort((a, b) => {
+    const fb = new Date(b.Fecha || 0).getTime();
+    const fa = new Date(a.Fecha || 0).getTime();
+    return fb - fa;
+  });
+
   const first = sorted[0];
 
   return {
@@ -231,32 +234,178 @@ function pickValue(seriesList, requiredTerms = [], excludedTerms = []) {
   return latestValue(series[0]);
 }
 
-function filterSeriesByGeo(seriesList, codigoIne, municipio, provincia) {
-  const safeList = Array.isArray(seriesList) ? seriesList : [];
-  const mun = normalizarTexto(municipio || "");
-  const prov = normalizarTexto(provincia || "");
-  const code = String(codigoIne || "");
+async function ineGruposTabla(tableId) {
+  const url = `${INE.base}/GRUPOS_TABLA/${tableId}`;
+  const raw = await fetchJson(url);
+  return toArray(raw);
+}
 
-  return safeList.filter((s) => {
-    const name = normalizarTexto(s.Nombre || "");
+async function ineValoresGrupo(tableId, grupoId) {
+  const url = `${INE.base}/VALORES_GRUPOSTABLA/${tableId}/${grupoId}`;
+  const raw = await fetchJson(url);
+  return toArray(raw);
+}
 
-    return (
-      (code && name.includes(code)) ||
-      (mun && name.includes(mun)) ||
-      (prov && name.includes(prov))
-    );
-  });
+function getId(obj) {
+  return (
+    obj.Id ||
+    obj.ID ||
+    obj.id ||
+    obj.Codigo ||
+    obj.codigo ||
+    obj.Cod ||
+    obj.cod ||
+    obj.Valor ||
+    obj.valor ||
+    obj.Key ||
+    obj.key ||
+    null
+  );
+}
+
+function getNombre(obj) {
+  return (
+    obj.Nombre ||
+    obj.nombre ||
+    obj.Name ||
+    obj.name ||
+    obj.Titulo ||
+    obj.titulo ||
+    obj.Descripcion ||
+    obj.descripcion ||
+    obj.Texto ||
+    obj.texto ||
+    ""
+  );
+}
+
+function getCodigoValor(obj) {
+  return String(
+    obj.Codigo ||
+    obj.codigo ||
+    obj.Cod ||
+    obj.cod ||
+    obj.Id ||
+    obj.id ||
+    obj.Valor ||
+    obj.valor ||
+    ""
+  );
+}
+
+async function encontrarFiltroTerritorial(tableId, ctx, advertencias) {
+  const grupos = await ineGruposTabla(tableId);
+  const codigo = String(ctx.codigo_ine || "");
+  const municipioNorm = normalizarTexto(ctx.municipio || "");
+  const provinciaNorm = normalizarTexto(ctx.provincia || "");
+
+  const candidatos = [];
+
+  for (const grupo of grupos) {
+    const grupoId = getId(grupo);
+    const grupoNombre = normalizarTexto(getNombre(grupo));
+
+    if (!grupoId) continue;
+
+    const pareceGeo =
+      grupoNombre.includes("municip") ||
+      grupoNombre.includes("provincia") ||
+      grupoNombre.includes("territ") ||
+      grupoNombre.includes("unidad") ||
+      grupoNombre.includes("geo") ||
+      grupoNombre.includes("lugar") ||
+      grupoNombre.includes("seccion") ||
+      grupoNombre.includes("distrito");
+
+    try {
+      const valores = await ineValoresGrupo(tableId, grupoId);
+
+      for (const valor of valores) {
+        const valorId = getId(valor);
+        const nombreValor = normalizarTexto(getNombre(valor));
+        const codigoValor = getCodigoValor(valor);
+
+        if (!valorId) continue;
+
+        const matchCodigo = codigo && (
+          codigoValor === codigo ||
+          codigoValor.endsWith(codigo) ||
+          String(valorId) === codigo ||
+          String(valorId).endsWith(codigo)
+        );
+
+        const matchMunicipio = municipioNorm && nombreValor.includes(municipioNorm);
+        const matchProvincia = provinciaNorm && nombreValor.includes(provinciaNorm);
+
+        if (matchCodigo || matchMunicipio || (pareceGeo && matchProvincia)) {
+          candidatos.push({
+            grupoId,
+            valorId,
+            grupoNombre,
+            valorNombre: getNombre(valor),
+            prioridad: matchCodigo ? 1 : matchMunicipio ? 2 : 3
+          });
+        }
+      }
+    } catch (e) {
+      advertencias.push(`No se pudieron leer valores del grupo ${grupoId} en tabla ${tableId}: ${e.message}`);
+    }
+  }
+
+  candidatos.sort((a, b) => a.prioridad - b.prioridad);
+
+  if (!candidatos.length) {
+    advertencias.push(`No se encontró filtro territorial compatible para tabla INE ${tableId}.`);
+    return null;
+  }
+
+  const c = candidatos[0];
+
+  return {
+    tv: `${c.grupoId}:${c.valorId}`,
+    grupoId: c.grupoId,
+    valorId: c.valorId,
+    valorNombre: c.valorNombre
+  };
+}
+
+async function ineTable(tableId, ctx, advertencias, nult = 1) {
+  let url = `${INE.base}/DATOS_TABLA/${tableId}?nult=${nult}&tip=A`;
+
+  try {
+    const filtro = await encontrarFiltroTerritorial(tableId, ctx, advertencias);
+
+    if (filtro?.tv) {
+      url += `&tv=${encodeURIComponent(filtro.tv)}`;
+    } else {
+      advertencias.push(`La tabla ${tableId} se consulta sin filtro territorial porque no se encontró tv.`);
+    }
+  } catch (e) {
+    advertencias.push(`No se pudo construir filtro tv para tabla ${tableId}: ${e.message}`);
+  }
+
+  const raw = await fetchJson(url);
+  return toSeriesArray(raw);
 }
 
 async function getRentaINE(ctx, advertencias) {
   try {
-    const tabla = await ineTable(INE.tablas.renta, 1);
-    const geoSeries = filterSeriesByGeo(tabla, ctx.codigo_ine, ctx.municipio, ctx.provincia);
+    const tabla = await ineTable(INE.tablas.renta, ctx, advertencias, 1);
 
-    const mediaPersona = pickValue(geoSeries, ["renta", "media", "persona"]);
-    const mediaHogar = pickValue(geoSeries, ["renta", "media", "hogar"]);
-    const mediana = pickValue(geoSeries, ["renta", "mediana"]);
-    const unidadConsumo = pickValue(geoSeries, ["unidad", "consumo"]);
+    const mediaPersona =
+      pickValue(tabla, ["renta", "media", "persona"]) ||
+      pickValue(tabla, ["media", "persona"]);
+
+    const mediaHogar =
+      pickValue(tabla, ["renta", "media", "hogar"]) ||
+      pickValue(tabla, ["media", "hogar"]);
+
+    const mediana =
+      pickValue(tabla, ["renta", "mediana"]) ||
+      pickValue(tabla, ["mediana"]);
+
+    const unidadConsumo =
+      pickValue(tabla, ["unidad", "consumo"]);
 
     if (
       mediaPersona.valor === null &&
@@ -264,7 +413,7 @@ async function getRentaINE(ctx, advertencias) {
       mediana.valor === null &&
       unidadConsumo.valor === null
     ) {
-      advertencias.push("El INE no devolvió indicadores de renta coincidentes para el municipio localizado.");
+      advertencias.push("El INE no devolvió indicadores de renta aprovechables para el filtro territorial localizado.");
     }
 
     return {
@@ -273,7 +422,7 @@ async function getRentaINE(ctx, advertencias) {
       renta_mediana: mediana.valor,
       renta_unidad_consumo: unidadConsumo.valor,
       fecha: mediaPersona.fecha || mediaHogar.fecha || mediana.fecha || unidadConsumo.fecha,
-      nivel_dato: "municipio si la tabla devuelve coincidencia territorial"
+      nivel_dato: "según filtro territorial INE"
     };
   } catch (e) {
     advertencias.push("No se pudo consultar renta INE: " + e.message);
@@ -290,16 +439,15 @@ async function getRentaINE(ctx, advertencias) {
 
 async function getPoblacionINE(ctx, advertencias) {
   try {
-    const tabla = await ineTable(INE.tablas.poblacion, 1);
-    const geoSeries = filterSeriesByGeo(tabla, ctx.codigo_ine, ctx.municipio, ctx.provincia);
+    const tabla = await ineTable(INE.tablas.poblacion, ctx, advertencias, 1);
 
-    const total = pickValue(geoSeries, ["total"], ["hombres", "mujeres"]);
-    const hombres = pickValue(geoSeries, ["hombres"]);
-    const mujeres = pickValue(geoSeries, ["mujeres"]);
-    const extranjera = pickValue(geoSeries, ["extranjera"]);
+    const total = pickValue(tabla, ["total"], ["hombres", "mujeres"]);
+    const hombres = pickValue(tabla, ["hombres"]);
+    const mujeres = pickValue(tabla, ["mujeres"]);
+    const extranjera = pickValue(tabla, ["extranjera"]);
 
     if (total.valor === null && hombres.valor === null && mujeres.valor === null) {
-      advertencias.push("El INE no devolvió población municipal coincidente.");
+      advertencias.push("El INE no devolvió población aprovechable para el filtro territorial localizado.");
     }
 
     return {
@@ -311,7 +459,7 @@ async function getPoblacionINE(ctx, advertencias) {
       menores_18: null,
       mayores_65: null,
       fecha: total.fecha || hombres.fecha || mujeres.fecha || extranjera.fecha,
-      nivel_dato: "municipio si la tabla devuelve coincidencia territorial"
+      nivel_dato: "según filtro territorial INE"
     };
   } catch (e) {
     advertencias.push("No se pudo consultar población INE: " + e.message);
@@ -331,15 +479,14 @@ async function getPoblacionINE(ctx, advertencias) {
 
 async function getEducacionINE(ctx, advertencias) {
   try {
-    const tabla = await ineTable(INE.tablas.educacion, 1);
-    const geoSeries = filterSeriesByGeo(tabla, ctx.codigo_ine, ctx.municipio, ctx.provincia);
+    const tabla = await ineTable(INE.tablas.educacion, ctx, advertencias, 1);
 
-    const superior = pickValue(geoSeries, ["superiores"]);
-    const secundaria = pickValue(geoSeries, ["secundaria"]);
-    const primaria = pickValue(geoSeries, ["primaria"]);
+    const superior = pickValue(tabla, ["superior"]);
+    const secundaria = pickValue(tabla, ["secundaria"]);
+    const primaria = pickValue(tabla, ["primaria"]);
 
     if (superior.valor === null && secundaria.valor === null && primaria.valor === null) {
-      advertencias.push("El INE no devolvió indicadores educativos coincidentes.");
+      advertencias.push("El INE no devolvió indicadores educativos aprovechables para el filtro territorial localizado.");
     }
 
     return {
@@ -347,7 +494,7 @@ async function getEducacionINE(ctx, advertencias) {
       estudios_secundarios: secundaria.valor,
       estudios_primarios: primaria.valor,
       fecha: superior.fecha || secundaria.fecha || primaria.fecha,
-      nivel_dato: "municipio si la tabla devuelve coincidencia territorial"
+      nivel_dato: "según filtro territorial INE"
     };
   } catch (e) {
     advertencias.push("No se pudo consultar educación INE: " + e.message);
@@ -363,15 +510,14 @@ async function getEducacionINE(ctx, advertencias) {
 
 async function getActividadINE(ctx, advertencias) {
   try {
-    const tabla = await ineTable(INE.tablas.actividad, 1);
-    const geoSeries = filterSeriesByGeo(tabla, ctx.codigo_ine, ctx.municipio, ctx.provincia);
+    const tabla = await ineTable(INE.tablas.actividad, ctx, advertencias, 1);
 
-    const ocupados = pickValue(geoSeries, ["ocupad"]);
-    const parados = pickValue(geoSeries, ["parad"]);
-    const activos = pickValue(geoSeries, ["activ"]);
+    const ocupados = pickValue(tabla, ["ocupad"]);
+    const parados = pickValue(tabla, ["parad"]);
+    const activos = pickValue(tabla, ["activ"]);
 
     if (ocupados.valor === null && parados.valor === null && activos.valor === null) {
-      advertencias.push("El INE no devolvió indicadores de actividad coincidentes.");
+      advertencias.push("El INE no devolvió indicadores de actividad aprovechables para el filtro territorial localizado.");
     }
 
     return {
@@ -379,7 +525,7 @@ async function getActividadINE(ctx, advertencias) {
       ocupados: ocupados.valor,
       parados: parados.valor,
       fecha: activos.fecha || ocupados.fecha || parados.fecha,
-      nivel_dato: "municipio si la tabla devuelve coincidencia territorial"
+      nivel_dato: "según filtro territorial INE"
     };
   } catch (e) {
     advertencias.push("No se pudo consultar actividad INE: " + e.message);
@@ -395,15 +541,20 @@ async function getActividadINE(ctx, advertencias) {
 
 async function getCompraventasINE(ctx, advertencias) {
   try {
-    const tabla = await ineTable(INE.tablas.compraventas, 1);
-    const geoSeries = filterSeriesByGeo(tabla, null, null, ctx.provincia);
+    const provinciaCtx = {
+      ...ctx,
+      codigo_ine: null,
+      municipio: null
+    };
 
-    const total = pickValue(geoSeries, ["total"]);
-    const nueva = pickValue(geoSeries, ["nueva"]);
-    const usada = pickValue(geoSeries, ["usada"]);
+    const tabla = await ineTable(INE.tablas.compraventas, provinciaCtx, advertencias, 1);
+
+    const total = pickValue(tabla, ["total"]);
+    const nueva = pickValue(tabla, ["nueva"]);
+    const usada = pickValue(tabla, ["usada"]);
 
     if (total.valor === null && nueva.valor === null && usada.valor === null) {
-      advertencias.push("El INE no devolvió compraventas provinciales coincidentes.");
+      advertencias.push("El INE no devolvió compraventas provinciales aprovechables para el filtro territorial localizado.");
     }
 
     return {
