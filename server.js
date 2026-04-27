@@ -1,6 +1,7 @@
 const express = require("express");
 const cors = require("cors");
-const XLSX = require("xlsx");
+const fs = require("fs");
+const path = require("path");
 
 const app = express();
 app.use(cors());
@@ -10,7 +11,6 @@ const PORT = process.env.PORT || 3000;
 
 const GEOAPIFY_KEY = process.env.GEOAPIFY_KEY;
 const AEMET_KEY = process.env.AEMET_KEY;
-const OPENROUTESERVICE_KEY = process.env.OPENROUTESERVICE_KEY;
 
 const CACHE_TTL_MS = 1000 * 60 * 60 * 24;
 const cache = new Map();
@@ -31,8 +31,8 @@ const GEOAPIFY_PLACES = "https://api.geoapify.com/v2/places";
 const OPEN_METEO_AIR = "https://air-quality-api.open-meteo.com/v1/air-quality";
 const OPEN_METEO_FORECAST = "https://api.open-meteo.com/v1/forecast";
 
-function normalizeText(value = "") {
-  return String(value)
+function normalizarTexto(v = "") {
+  return String(v)
     .normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "")
     .toLowerCase()
@@ -45,33 +45,20 @@ function normalizeText(value = "") {
 function cacheGet(key) {
   const item = cache.get(key);
   if (!item) return null;
+
   if (Date.now() - item.time > CACHE_TTL_MS) {
     cache.delete(key);
     return null;
   }
+
   return item.value;
 }
 
 function cacheSet(key, value) {
-  cache.set(key, { time: Date.now(), value });
-}
-
-async function fetchBuffer(url) {
-  const cached = cacheGet("buffer:" + url);
-  if (cached) return cached;
-
-  const res = await fetch(url, {
-    headers: { "User-Agent": "InmoRecursos/1.0" }
+  cache.set(key, {
+    time: Date.now(),
+    value
   });
-
-  if (!res.ok) {
-    throw new Error(`HTTP ${res.status} al descargar ${url}`);
-  }
-
-  const arrayBuffer = await res.arrayBuffer();
-  const buffer = Buffer.from(arrayBuffer);
-  cacheSet("buffer:" + url, buffer);
-  return buffer;
 }
 
 async function fetchText(url, options = {}) {
@@ -93,54 +80,87 @@ async function fetchText(url, options = {}) {
     throw new Error(`HTTP ${res.status}: ${text.slice(0, 240)}`);
   }
 
-  if (text.trim().startsWith("<")) {
-    throw new Error(`La fuente ha devuelto HTML y no JSON: ${text.slice(0, 180)}`);
-  }
-
   cacheSet(cacheKey, text);
   return text;
 }
 
 async function fetchJson(url, options = {}) {
   const text = await fetchText(url, options);
+
+  if (text.trim().startsWith("<")) {
+    throw new Error(`La fuente ha devuelto HTML y no JSON: ${text.slice(0, 180)}`);
+  }
+
   try {
     return JSON.parse(text);
-  } catch {
-    throw new Error(`JSON no válido desde ${url}`);
+  } catch (e) {
+    throw new Error(`JSON no válido recibido desde: ${url}`);
   }
 }
 
-function latestValue(series) {
-  const data = Array.isArray(series?.Data) ? series.Data : [];
-  if (!data.length) return { valor: null, fecha: null };
+function cargarMunicipiosLocales() {
+  const filePath = path.join(__dirname, "municipios.json");
 
-  const sorted = [...data].sort((a, b) => Number(b.Fecha || 0) - Number(a.Fecha || 0));
-  const first = sorted[0];
+  if (!fs.existsSync(filePath)) {
+    return [];
+  }
 
-  return {
-    valor: first?.Valor ?? null,
-    fecha: first?.Fecha ?? null
-  };
+  try {
+    const raw = fs.readFileSync(filePath, "utf8");
+    return JSON.parse(raw);
+  } catch (e) {
+    return [];
+  }
 }
 
-function findSeriesByText(seriesList, requiredTerms = [], excludedTerms = []) {
-  const req = requiredTerms.map(normalizeText).filter(Boolean);
-  const exc = excludedTerms.map(normalizeText).filter(Boolean);
+function resolveCodigoINELocal(municipio, provincia, advertencias = []) {
+  const municipios = cargarMunicipiosLocales();
 
-  return (seriesList || []).filter((s) => {
-    const name = normalizeText(s.Nombre || "");
-    return req.every((t) => name.includes(t)) && !exc.some((t) => name.includes(t));
-  });
-}
+  if (!municipios.length) {
+    advertencias.push("No existe municipios.json o está vacío. No se puede resolver código INE municipal.");
+    return null;
+  }
 
-function pickValue(seriesList, requiredTerms, excludedTerms = []) {
-  const series = findSeriesByText(seriesList, requiredTerms, excludedTerms);
-  if (!series.length) return { valor: null, fecha: null };
-  return latestValue(series[0]);
+  const munNorm = normalizarTexto(municipio || "");
+  const provNorm = normalizarTexto(provincia || "");
+
+  let encontrados = municipios.filter((m) =>
+    normalizarTexto(m.municipio) === munNorm
+  );
+
+  if (!encontrados.length) {
+    encontrados = municipios.filter((m) =>
+      normalizarTexto(m.municipio).includes(munNorm) ||
+      munNorm.includes(normalizarTexto(m.municipio))
+    );
+  }
+
+  if (provNorm && encontrados.length > 1) {
+    encontrados = encontrados.filter((m) =>
+      normalizarTexto(m.provincia) === provNorm ||
+      normalizarTexto(m.provincia).includes(provNorm) ||
+      provNorm.includes(normalizarTexto(m.provincia))
+    );
+  }
+
+  if (!encontrados.length) {
+    advertencias.push(
+      `No se ha encontrado código INE local para "${municipio || "municipio no identificado"}". Añada ese municipio a municipios.json.`
+    );
+    return null;
+  }
+
+  if (encontrados.length > 1) {
+    advertencias.push(`Se han encontrado varios códigos INE para "${municipio}". Se usa el primero.`);
+  }
+
+  return encontrados[0].codigo_ine || null;
 }
 
 async function geocodeAddress(direccion) {
-  if (!GEOAPIFY_KEY) throw new Error("Falta GEOAPIFY_KEY en Render.");
+  if (!GEOAPIFY_KEY) {
+    throw new Error("Falta GEOAPIFY_KEY en Render.");
+  }
 
   const url =
     `${GEOAPIFY_GEOCODE}?text=${encodeURIComponent(direccion)}` +
@@ -149,7 +169,9 @@ async function geocodeAddress(direccion) {
   const data = await fetchJson(url);
   const f = data.features?.[0];
 
-  if (!f) throw new Error("No se ha podido geolocalizar la dirección.");
+  if (!f) {
+    throw new Error("No se ha podido geolocalizar la dirección.");
+  }
 
   const p = f.properties || {};
 
@@ -163,138 +185,61 @@ async function geocodeAddress(direccion) {
   };
 }
 
-/**
- * Descarga oficial de códigos INE.
- * El INE cambia cada año la ruta codmunXX/XXcodmun.xls(x).
- * Se prueban años recientes y extensiones habituales. Si no se consigue,
- * el endpoint devuelve codigo_ine=null y una advertencia, no inventa nada.
- */
-async function loadMunicipiosINE() {
-  const cached = cacheGet("municipios_ine");
-  if (cached) return cached;
-
-  const currentYear = new Date().getFullYear();
-  const yyList = [];
-  for (let y = currentYear; y >= currentYear - 8; y--) yyList.push(String(y).slice(-2));
-
-  const candidates = [];
-  yyList.forEach((yy) => {
-    candidates.push(`https://www.ine.es/daco/daco42/codmun/codmun${yy}/${yy}codmun.xlsx`);
-    candidates.push(`https://www.ine.es/daco/daco42/codmun/codmun${yy}/${yy}codmun.xls`);
-  });
-
-  let lastError = null;
-
-  for (const url of candidates) {
-    try {
-      const buffer = await fetchBuffer(url);
-      const wb = XLSX.read(buffer, { type: "buffer" });
-      const sheet = wb.Sheets[wb.SheetNames[0]];
-      const rows = XLSX.utils.sheet_to_json(sheet, { defval: "" });
-
-      const parsed = rows
-        .map((r) => {
-          const keys = Object.keys(r);
-          const cproKey = keys.find((k) => normalizeText(k).includes("cpro") || normalizeText(k).includes("provincia"));
-          const cmunKey = keys.find((k) => normalizeText(k).includes("cmun") || normalizeText(k).includes("municipio"));
-          const nombreKey = keys.find((k) => normalizeText(k).includes("nombre") || normalizeText(k).includes("denominacion"));
-
-          const cpro = cproKey ? String(r[cproKey]).padStart(2, "0") : null;
-          const cmun = cmunKey ? String(r[cmunKey]).padStart(3, "0").slice(0, 3) : null;
-          const nombre = nombreKey ? String(r[nombreKey]) : null;
-
-          if (!cpro || !cmun || !nombre) return null;
-
-          return {
-            cpro,
-            cmun,
-            codigo_ine: cpro + cmun,
-            nombre,
-            nombre_norm: normalizeText(nombre)
-          };
-        })
-        .filter(Boolean);
-
-      if (parsed.length > 7000) {
-        cacheSet("municipios_ine", parsed);
-        return parsed;
-      }
-    } catch (e) {
-      lastError = e;
-    }
-  }
-
-  throw new Error("No se pudo descargar la relación oficial de municipios INE. " + (lastError?.message || ""));
-}
-
-async function resolveCodigoINE(municipio, provincia, advertencias) {
-  if (!municipio) {
-    advertencias.push("No se puede resolver código INE municipal porque no se ha identificado municipio.");
-    return null;
-  }
-
-  try {
-    const list = await loadMunicipiosINE();
-    const municipioNorm = normalizeText(municipio);
-    const provinciaNorm = normalizeText(provincia || "");
-
-    let matches = list.filter((m) => m.nombre_norm === municipioNorm);
-
-    if (!matches.length) {
-      matches = list.filter((m) => m.nombre_norm.includes(municipioNorm) || municipioNorm.includes(m.nombre_norm));
-    }
-
-    if (matches.length > 1 && provinciaNorm) {
-      const provMap = await loadProvinciasINE().catch(() => null);
-      if (provMap) {
-        matches = matches.filter((m) => normalizeText(provMap[m.cpro] || "") === provinciaNorm);
-      }
-    }
-
-    if (!matches.length) {
-      advertencias.push(`No se ha encontrado código INE para el municipio "${municipio}".`);
-      return null;
-    }
-
-    if (matches.length > 1) {
-      advertencias.push(`Hay varios municipios compatibles con "${municipio}". Se devuelve el primero encontrado.`);
-    }
-
-    return matches[0].codigo_ine;
-  } catch (e) {
-    advertencias.push("No se pudo resolver código INE municipal: " + e.message);
-    return null;
-  }
-}
-
-async function loadProvinciasINE() {
-  const cached = cacheGet("provincias_ine");
-  if (cached) return cached;
-
-  const html = await fetchText("https://www.ine.es/daco/daco42/codmun/cod_provincia.htm");
-  const map = {};
-  const regex = /<td[^>]*>\s*(\d{2})\s*<\/td>\s*<td[^>]*>\s*([^<]+)\s*<\/td>/gi;
-  let m;
-  while ((m = regex.exec(html))) {
-    map[m[1]] = m[2].trim();
-  }
-
-  cacheSet("provincias_ine", map);
-  return map;
-}
-
 async function ineTable(tableId, nult = 1) {
   const url = `${INE.base}/DATOS_TABLA/${tableId}?nult=${nult}&tip=A`;
   return await fetchJson(url);
 }
 
+function latestValue(series) {
+  const data = Array.isArray(series?.Data) ? series.Data : [];
+
+  if (!data.length) {
+    return {
+      valor: null,
+      fecha: null
+    };
+  }
+
+  const sorted = [...data].sort((a, b) => Number(b.Fecha || 0) - Number(a.Fecha || 0));
+  const first = sorted[0];
+
+  return {
+    valor: first?.Valor ?? null,
+    fecha: first?.Fecha ?? null
+  };
+}
+
+function findSeriesByText(seriesList, requiredTerms = [], excludedTerms = []) {
+  const req = requiredTerms.map(normalizarTexto).filter(Boolean);
+  const exc = excludedTerms.map(normalizarTexto).filter(Boolean);
+
+  return (seriesList || []).filter((s) => {
+    const name = normalizarTexto(s.Nombre || "");
+    return req.every((t) => name.includes(t)) && !exc.some((t) => name.includes(t));
+  });
+}
+
+function pickValue(seriesList, requiredTerms = [], excludedTerms = []) {
+  const series = findSeriesByText(seriesList, requiredTerms, excludedTerms);
+
+  if (!series.length) {
+    return {
+      valor: null,
+      fecha: null
+    };
+  }
+
+  return latestValue(series[0]);
+}
+
 function filterSeriesByGeo(seriesList, codigoIne, municipio, provincia) {
-  const mun = normalizeText(municipio || "");
-  const prov = normalizeText(provincia || "");
+  const mun = normalizarTexto(municipio || "");
+  const prov = normalizarTexto(provincia || "");
   const code = String(codigoIne || "");
 
   return (seriesList || []).filter((s) => {
-    const name = normalizeText(s.Nombre || "");
+    const name = normalizarTexto(s.Nombre || "");
+
     return (
       (code && name.includes(code)) ||
       (mun && name.includes(mun)) ||
@@ -303,10 +248,10 @@ function filterSeriesByGeo(seriesList, codigoIne, municipio, provincia) {
   });
 }
 
-async function getRentaINE({ codigo_ine, municipio, provincia }, advertencias) {
+async function getRentaINE(ctx, advertencias) {
   try {
     const tabla = await ineTable(INE.tablas.renta, 1);
-    const geoSeries = filterSeriesByGeo(tabla, codigo_ine, municipio, provincia);
+    const geoSeries = filterSeriesByGeo(tabla, ctx.codigo_ine, ctx.municipio, ctx.provincia);
 
     const mediaPersona = pickValue(geoSeries, ["renta", "media", "persona"]);
     const mediaHogar = pickValue(geoSeries, ["renta", "media", "hogar"]);
@@ -328,10 +273,11 @@ async function getRentaINE({ codigo_ine, municipio, provincia }, advertencias) {
       renta_mediana: mediana.valor,
       renta_unidad_consumo: unidadConsumo.valor,
       fecha: mediaPersona.fecha || mediaHogar.fecha || mediana.fecha || unidadConsumo.fecha,
-      nivel_dato: "municipio si la tabla lo permite; si no, coincidencia territorial disponible"
+      nivel_dato: "municipio si la tabla devuelve coincidencia territorial"
     };
   } catch (e) {
     advertencias.push("No se pudo consultar renta INE: " + e.message);
+
     return {
       renta_media_persona: null,
       renta_media_hogar: null,
@@ -343,10 +289,10 @@ async function getRentaINE({ codigo_ine, municipio, provincia }, advertencias) {
   }
 }
 
-async function getPoblacionINE({ codigo_ine, municipio, provincia }, advertencias) {
+async function getPoblacionINE(ctx, advertencias) {
   try {
     const tabla = await ineTable(INE.tablas.poblacion, 1);
-    const geoSeries = filterSeriesByGeo(tabla, codigo_ine, municipio, provincia);
+    const geoSeries = filterSeriesByGeo(tabla, ctx.codigo_ine, ctx.municipio, ctx.provincia);
 
     const total = pickValue(geoSeries, ["total"], ["hombres", "mujeres"]);
     const hombres = pickValue(geoSeries, ["hombres"]);
@@ -366,10 +312,11 @@ async function getPoblacionINE({ codigo_ine, municipio, provincia }, advertencia
       menores_18: null,
       mayores_65: null,
       fecha: total.fecha || hombres.fecha || mujeres.fecha || extranjera.fecha,
-      nivel_dato: "municipio si la tabla lo permite; si no, coincidencia territorial disponible"
+      nivel_dato: "municipio si la tabla devuelve coincidencia territorial"
     };
   } catch (e) {
     advertencias.push("No se pudo consultar población INE: " + e.message);
+
     return {
       poblacion_total: null,
       hombres: null,
@@ -384,10 +331,10 @@ async function getPoblacionINE({ codigo_ine, municipio, provincia }, advertencia
   }
 }
 
-async function getEducacionINE({ codigo_ine, municipio, provincia }, advertencias) {
+async function getEducacionINE(ctx, advertencias) {
   try {
     const tabla = await ineTable(INE.tablas.educacion, 1);
-    const geoSeries = filterSeriesByGeo(tabla, codigo_ine, municipio, provincia);
+    const geoSeries = filterSeriesByGeo(tabla, ctx.codigo_ine, ctx.municipio, ctx.provincia);
 
     const superior = pickValue(geoSeries, ["superiores"]);
     const secundaria = pickValue(geoSeries, ["secundaria"]);
@@ -402,10 +349,11 @@ async function getEducacionINE({ codigo_ine, municipio, provincia }, advertencia
       estudios_secundarios: secundaria.valor,
       estudios_primarios: primaria.valor,
       fecha: superior.fecha || secundaria.fecha || primaria.fecha,
-      nivel_dato: "municipio si la tabla lo permite; si no, coincidencia territorial disponible"
+      nivel_dato: "municipio si la tabla devuelve coincidencia territorial"
     };
   } catch (e) {
     advertencias.push("No se pudo consultar educación INE: " + e.message);
+
     return {
       estudios_superiores: null,
       estudios_secundarios: null,
@@ -416,10 +364,10 @@ async function getEducacionINE({ codigo_ine, municipio, provincia }, advertencia
   }
 }
 
-async function getActividadINE({ codigo_ine, municipio, provincia }, advertencias) {
+async function getActividadINE(ctx, advertencias) {
   try {
     const tabla = await ineTable(INE.tablas.actividad, 1);
-    const geoSeries = filterSeriesByGeo(tabla, codigo_ine, municipio, provincia);
+    const geoSeries = filterSeriesByGeo(tabla, ctx.codigo_ine, ctx.municipio, ctx.provincia);
 
     const ocupados = pickValue(geoSeries, ["ocupad"]);
     const parados = pickValue(geoSeries, ["parad"]);
@@ -434,10 +382,11 @@ async function getActividadINE({ codigo_ine, municipio, provincia }, advertencia
       ocupados: ocupados.valor,
       parados: parados.valor,
       fecha: activos.fecha || ocupados.fecha || parados.fecha,
-      nivel_dato: "municipio si la tabla lo permite; si no, coincidencia territorial disponible"
+      nivel_dato: "municipio si la tabla devuelve coincidencia territorial"
     };
   } catch (e) {
     advertencias.push("No se pudo consultar actividad INE: " + e.message);
+
     return {
       poblacion_activa: null,
       ocupados: null,
@@ -448,10 +397,10 @@ async function getActividadINE({ codigo_ine, municipio, provincia }, advertencia
   }
 }
 
-async function getCompraventasINE({ provincia }, advertencias) {
+async function getCompraventasINE(ctx, advertencias) {
   try {
     const tabla = await ineTable(INE.tablas.compraventas, 1);
-    const geoSeries = filterSeriesByGeo(tabla, null, null, provincia);
+    const geoSeries = filterSeriesByGeo(tabla, null, null, ctx.provincia);
 
     const total = pickValue(geoSeries, ["total"]);
     const nueva = pickValue(geoSeries, ["nueva"]);
@@ -470,6 +419,7 @@ async function getCompraventasINE({ provincia }, advertencias) {
     };
   } catch (e) {
     advertencias.push("No se pudo consultar compraventas INE: " + e.message);
+
     return {
       compraventas_total: null,
       compraventas_vivienda_nueva: null,
@@ -491,9 +441,15 @@ async function getAirAndUV(lat, lon, advertencias) {
       `${OPEN_METEO_FORECAST}?latitude=${lat}&longitude=${lon}` +
       `&daily=uv_index_max,uv_index_clear_sky_max&current=temperature_2m,relative_humidity_2m,wind_speed_10m&timezone=auto`;
 
-    const [air, uv] = await Promise.all([fetchJson(airUrl), fetchJson(uvUrl)]);
+    const [air, uv] = await Promise.all([
+      fetchJson(airUrl),
+      fetchJson(uvUrl)
+    ]);
 
-    const firstValid = (arr) => Array.isArray(arr) ? arr.find((v) => v !== null && v !== undefined) ?? null : null;
+    const firstValid = (arr) =>
+      Array.isArray(arr)
+        ? arr.find((v) => v !== null && v !== undefined) ?? null
+        : null;
 
     return {
       aire: {
@@ -517,6 +473,7 @@ async function getAirAndUV(lat, lon, advertencias) {
     };
   } catch (e) {
     advertencias.push("No se pudo consultar Open-Meteo: " + e.message);
+
     return {
       aire: {},
       radiacion: {},
@@ -534,7 +491,11 @@ async function getAemetUvi(advertencias) {
   try {
     const url = `https://opendata.aemet.es/opendata/api/prediccion/especifica/uvi/0/?api_key=${AEMET_KEY}`;
     const meta = await fetchJson(url);
-    if (!meta.datos) throw new Error("AEMET no devolvió URL de datos.");
+
+    if (!meta.datos) {
+      throw new Error("AEMET no devolvió URL de datos.");
+    }
+
     return await fetchJson(meta.datos);
   } catch (e) {
     advertencias.push("No se pudo consultar AEMET UVI: " + e.message);
@@ -543,7 +504,9 @@ async function getAemetUvi(advertencias) {
 }
 
 async function getPlaces(lat, lon, radio, advertencias) {
-  if (!GEOAPIFY_KEY) throw new Error("Falta GEOAPIFY_KEY.");
+  if (!GEOAPIFY_KEY) {
+    throw new Error("Falta GEOAPIFY_KEY.");
+  }
 
   try {
     const categories = [
@@ -567,6 +530,7 @@ async function getPlaces(lat, lon, radio, advertencias) {
 
     const servicios = (data.features || []).map((f) => {
       const p = f.properties || {};
+
       return {
         nombre: p.name || p.address_line1 || null,
         tipo: Array.isArray(p.categories) ? p.categories[0] : null,
@@ -577,6 +541,7 @@ async function getPlaces(lat, lon, radio, advertencias) {
     });
 
     const resumen = {};
+
     servicios.forEach((s) => {
       const key = s.tipo ? s.tipo.split(".")[0] : "servicio";
       resumen[key] = (resumen[key] || 0) + 1;
@@ -590,6 +555,7 @@ async function getPlaces(lat, lon, radio, advertencias) {
     };
   } catch (e) {
     advertencias.push("No se pudieron consultar servicios Geoapify: " + e.message);
+
     return {
       servicios_resumen: {},
       servicios_con_direccion: [],
@@ -601,12 +567,14 @@ async function getPlaces(lat, lon, radio, advertencias) {
 
 function parseOptionalNumber(value) {
   if (value === null || value === undefined || value === "") return null;
+
   const n = Number(value);
   return Number.isFinite(n) ? n : null;
 }
 
 function calcularCTR(body) {
   const advertencias = [];
+
   const componentes = {
     cuota: parseOptionalNumber(body.cuota),
     ibi: parseOptionalNumber(body.ibi),
@@ -618,6 +586,7 @@ function calcularCTR(body) {
   };
 
   let mensual = 0;
+
   Object.entries(componentes).forEach(([k, v]) => {
     if (v === null) {
       advertencias.push(`${k} no incluido: no se ha introducido dato real.`);
@@ -630,7 +599,9 @@ function calcularCTR(body) {
   const anual = mensual * 12;
   const total_periodo = anos !== null ? anual * anos : null;
 
-  if (anos === null) advertencias.push("Total de periodo no calculado: falta plazo real en años.");
+  if (anos === null) {
+    advertencias.push("Total de periodo no calculado: falta plazo real en años.");
+  }
 
   return {
     ctr_mensual: mensual,
@@ -656,13 +627,19 @@ app.get("/", (req, res) => {
 
 app.get("/demografia", async (req, res) => {
   const direccion = req.query.direccion;
-  if (!direccion) return res.status(400).json({ ok: false, error: "Falta direccion." });
+
+  if (!direccion) {
+    return res.status(400).json({
+      ok: false,
+      error: "Falta direccion."
+    });
+  }
 
   const advertencias = [];
 
   try {
     const geo = await geocodeAddress(direccion);
-    const codigo_ine = await resolveCodigoINE(geo.municipio, geo.provincia, advertencias);
+    const codigo_ine = resolveCodigoINELocal(geo.municipio, geo.provincia, advertencias);
 
     const ctx = {
       codigo_ine,
@@ -705,17 +682,44 @@ app.get("/demografia", async (req, res) => {
       educacion,
       actividad,
       fuentes: [
-        { nombre: "INE - Relación de municipios y códigos", nivel: "municipio" },
-        { nombre: "INE - DATOS_TABLA 30896", contenido: "renta", nivel: "según disponibilidad" },
-        { nombre: "INE - DATOS_TABLA 68532", contenido: "población", nivel: "según disponibilidad" },
-        { nombre: "INE - DATOS_TABLA 66620", contenido: "educación", nivel: "según disponibilidad" },
-        { nombre: "INE - DATOS_TABLA 67079", contenido: "actividad", nivel: "según disponibilidad" },
-        { nombre: "INE - DATOS_TABLA 6150", contenido: "compraventas", nivel: "provincia" }
+        {
+          nombre: "INE - Relación local municipios.json",
+          nivel: "municipio"
+        },
+        {
+          nombre: "INE - DATOS_TABLA 30896",
+          contenido: "renta",
+          nivel: "según disponibilidad"
+        },
+        {
+          nombre: "INE - DATOS_TABLA 68532",
+          contenido: "población",
+          nivel: "según disponibilidad"
+        },
+        {
+          nombre: "INE - DATOS_TABLA 66620",
+          contenido: "educación",
+          nivel: "según disponibilidad"
+        },
+        {
+          nombre: "INE - DATOS_TABLA 67079",
+          contenido: "actividad",
+          nivel: "según disponibilidad"
+        },
+        {
+          nombre: "INE - DATOS_TABLA 6150",
+          contenido: "compraventas",
+          nivel: "provincia"
+        }
       ],
       advertencias
     });
   } catch (e) {
-    res.status(500).json({ ok: false, error: "Error en /demografia.", detalle: e.message });
+    res.status(500).json({
+      ok: false,
+      error: "Error en /demografia.",
+      detalle: e.message
+    });
   }
 });
 
@@ -724,7 +728,12 @@ app.get("/entorno", async (req, res) => {
   const radio = Number(req.query.radio || 500);
   const advertencias = [];
 
-  if (!direccion) return res.status(400).json({ ok: false, error: "Falta direccion." });
+  if (!direccion) {
+    return res.status(400).json({
+      ok: false,
+      error: "Falta direccion."
+    });
+  }
 
   try {
     const geo = await geocodeAddress(direccion);
@@ -756,16 +765,28 @@ app.get("/entorno", async (req, res) => {
       advertencias
     });
   } catch (e) {
-    res.status(500).json({ ok: false, error: "Error en /entorno.", detalle: e.message });
+    res.status(500).json({
+      ok: false,
+      error: "Error en /entorno.",
+      detalle: e.message
+    });
   }
 });
 
 app.post("/ctr", (req, res) => {
   try {
     const ctr = calcularCTR(req.body || {});
-    res.json({ ok: true, ctr });
+
+    res.json({
+      ok: true,
+      ctr
+    });
   } catch (e) {
-    res.status(500).json({ ok: false, error: "Error en /ctr.", detalle: e.message });
+    res.status(500).json({
+      ok: false,
+      error: "Error en /ctr.",
+      detalle: e.message
+    });
   }
 });
 
