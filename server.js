@@ -13,6 +13,8 @@ const GEOAPIFY_KEY = process.env.GEOAPIFY_KEY;
 const AEMET_KEY = process.env.AEMET_KEY;
 
 const CACHE_TTL_MS = 1000 * 60 * 60 * 24;
+const BDE_CACHE_TTL_MS = 1000 * 60 * 60;
+
 const cache = new Map();
 
 const INE = {
@@ -31,6 +33,13 @@ const GEOAPIFY_PLACES = "https://api.geoapify.com/v2/places";
 const OPEN_METEO_AIR = "https://air-quality-api.open-meteo.com/v1/air-quality";
 const OPEN_METEO_FORECAST = "https://api.open-meteo.com/v1/forecast";
 
+const BDE_API_BASE = "https://app.bde.es/bierest/resources/srdatosapp";
+
+const BDE_SERIES = {
+  euribor: process.env.BDE_SERIE_EURIBOR || "D_1NBAF472",
+  tipo_medio_hipotecario: process.env.BDE_SERIE_TIPO_HIPOTECARIO || "D_1T9H0000"
+};
+
 function normalizarTexto(v = "") {
   return String(v)
     .normalize("NFD")
@@ -42,13 +51,15 @@ function normalizarTexto(v = "") {
     .trim();
 }
 
-function cacheGet(key) {
+function cacheGet(key, ttl = CACHE_TTL_MS) {
   const item = cache.get(key);
   if (!item) return null;
-  if (Date.now() - item.time > CACHE_TTL_MS) {
+
+  if (Date.now() - item.time > ttl) {
     cache.delete(key);
     return null;
   }
+
   return item.value;
 }
 
@@ -580,7 +591,7 @@ function normalizarSalidaDemografia(obj) {
       delete obj.renta["renta_medi a_persona"];
     }
 
-    if (obj.renta["renta_media_persona"] === undefined) {
+    if (obj.renta.renta_media_persona === undefined) {
       obj.renta.renta_media_persona = null;
     }
   }
@@ -591,7 +602,7 @@ function normalizarSalidaDemografia(obj) {
       delete obj.educacion["estudio s_secundarios"];
     }
 
-    if (obj.educacion["estudios_secundarios"] === undefined) {
+    if (obj.educacion.estudios_secundarios === undefined) {
       obj.educacion.estudios_secundarios = null;
     }
   }
@@ -687,6 +698,7 @@ async function getPlaces(lat, lon, radio, advertencias) {
 
     const servicios = (data.features || []).map((f) => {
       const p = f.properties || {};
+
       return {
         nombre: p.name || p.address_line1 || null,
         tipo: Array.isArray(p.categories) ? p.categories[0] : null,
@@ -767,11 +779,86 @@ function calcularCTR(body) {
   };
 }
 
+async function getBancoEspanaUltimos(advertencias = []) {
+  const series = [
+    BDE_SERIES.euribor,
+    BDE_SERIES.tipo_medio_hipotecario
+  ].filter(Boolean).join(",");
+
+  const url = `${BDE_API_BASE}/favoritas?idioma=es&series=${encodeURIComponent(series)}`;
+
+  try {
+    const cacheKey = "bde:" + url;
+    const cached = cacheGet(cacheKey, BDE_CACHE_TTL_MS);
+    if (cached) return cached;
+
+    const raw = await fetchJson(url);
+    const arr = Array.isArray(raw) ? raw : toArray(raw);
+
+    const findSerie = (codigo) =>
+      arr.find((x) => String(x.serie || "").toUpperCase() === String(codigo || "").toUpperCase()) || null;
+
+    const euriborRaw = findSerie(BDE_SERIES.euribor);
+    const tipoRaw = findSerie(BDE_SERIES.tipo_medio_hipotecario);
+
+    const normalizarSerie = (x, nombreFallback) => {
+      if (!x) return null;
+
+      const valor = Number(String(x.valor ?? "").replace(",", "."));
+
+      return {
+        serie: x.serie || null,
+        descripcion: x.descripcionCorta || x.descripcion || nombreFallback,
+        frecuencia: x.codFrecuencia || null,
+        valor: Number.isFinite(valor) ? valor : null,
+        simbolo: x.simbolo || "%",
+        tendencia: x.tendencia || null,
+        fecha: x.fechaValor || null,
+        fuente: "Banco de España"
+      };
+    };
+
+    const salida = {
+      euribor: normalizarSerie(euriborRaw, "Euríbor"),
+      tipo_medio_hipotecario: normalizarSerie(tipoRaw, "Tipo medio hipotecario"),
+      actualizado_en_backend: new Date().toISOString(),
+      fuente: "Banco de España - API BIEST",
+      advertencias
+    };
+
+    if (!salida.euribor) {
+      salida.advertencias.push(`No se encontró la serie Euríbor configurada: ${BDE_SERIES.euribor}`);
+    }
+
+    if (!salida.tipo_medio_hipotecario) {
+      salida.advertencias.push(`No se encontró la serie de tipo medio hipotecario configurada: ${BDE_SERIES.tipo_medio_hipotecario}`);
+    }
+
+    cacheSet(cacheKey, salida);
+    return salida;
+  } catch (e) {
+    advertencias.push("No se pudo consultar Banco de España: " + e.message);
+
+    return {
+      euribor: null,
+      tipo_medio_hipotecario: null,
+      actualizado_en_backend: new Date().toISOString(),
+      fuente: "Banco de España - API BIEST",
+      advertencias
+    };
+  }
+}
+
 app.get("/", (req, res) => {
   res.json({
     ok: true,
     servicio: "InmoRecursos backend real",
-    endpoints: ["/demografia?direccion=", "/entorno?direccion=&radio=500", "POST /ctr"]
+    endpoints: [
+      "/demografia?direccion=",
+      "/entorno?direccion=&radio=500",
+      "/financiero",
+      "POST /ctr"
+    ]
   });
 });
 
@@ -891,6 +978,25 @@ app.get("/entorno", async (req, res) => {
     res.status(500).json({
       ok: false,
       error: "Error en /entorno.",
+      detalle: e.message
+    });
+  }
+});
+
+app.get("/financiero", async (req, res) => {
+  const advertencias = [];
+
+  try {
+    const financiero = await getBancoEspanaUltimos(advertencias);
+
+    res.json({
+      ok: true,
+      financiero
+    });
+  } catch (e) {
+    res.status(500).json({
+      ok: false,
+      error: "Error en /financiero.",
       detalle: e.message
     });
   }
