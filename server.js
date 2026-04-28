@@ -392,20 +392,10 @@ async function getRentaINE(ctx, advertencias) {
   try {
     const tabla = await ineTable(INE.tablas.renta, ctx, advertencias, 1);
 
-    const mediaPersona =
-      pickValue(tabla, ["renta", "media", "persona"]) ||
-      pickValue(tabla, ["media", "persona"]);
-
-    const mediaHogar =
-      pickValue(tabla, ["renta", "media", "hogar"]) ||
-      pickValue(tabla, ["media", "hogar"]);
-
-    const mediana =
-      pickValue(tabla, ["renta", "mediana"]) ||
-      pickValue(tabla, ["mediana"]);
-
-    const unidadConsumo =
-      pickValue(tabla, ["unidad", "consumo"]);
+    const mediaPersona = pickValue(tabla, ["renta", "media", "persona"]);
+    const mediaHogar = pickValue(tabla, ["renta", "media", "hogar"]);
+    const mediana = pickValue(tabla, ["renta", "mediana"]);
+    const unidadConsumo = pickValue(tabla, ["unidad", "consumo"]);
 
     if (
       mediaPersona.valor === null &&
@@ -426,6 +416,7 @@ async function getRentaINE(ctx, advertencias) {
     };
   } catch (e) {
     advertencias.push("No se pudo consultar renta INE: " + e.message);
+
     return {
       renta_media_persona: null,
       renta_media_hogar: null,
@@ -463,6 +454,7 @@ async function getPoblacionINE(ctx, advertencias) {
     };
   } catch (e) {
     advertencias.push("No se pudo consultar población INE: " + e.message);
+
     return {
       poblacion_total: null,
       hombres: null,
@@ -498,6 +490,7 @@ async function getEducacionINE(ctx, advertencias) {
     };
   } catch (e) {
     advertencias.push("No se pudo consultar educación INE: " + e.message);
+
     return {
       estudios_superiores: null,
       estudios_secundarios: null,
@@ -529,6 +522,7 @@ async function getActividadINE(ctx, advertencias) {
     };
   } catch (e) {
     advertencias.push("No se pudo consultar actividad INE: " + e.message);
+
     return {
       poblacion_activa: null,
       ocupados: null,
@@ -566,6 +560,7 @@ async function getCompraventasINE(ctx, advertencias) {
     };
   } catch (e) {
     advertencias.push("No se pudo consultar compraventas INE: " + e.message);
+
     return {
       compraventas_total: null,
       compraventas_vivienda_nueva: null,
@@ -574,6 +569,34 @@ async function getCompraventasINE(ctx, advertencias) {
       nivel_dato: null
     };
   }
+}
+
+function normalizarSalidaDemografia(obj) {
+  if (!obj || typeof obj !== "object") return obj;
+
+  if (obj.renta) {
+    if (obj.renta["renta_medi a_persona"] !== undefined && obj.renta.renta_media_persona === undefined) {
+      obj.renta.renta_media_persona = obj.renta["renta_medi a_persona"];
+      delete obj.renta["renta_medi a_persona"];
+    }
+
+    if (obj.renta["renta_media_persona"] === undefined) {
+      obj.renta.renta_media_persona = null;
+    }
+  }
+
+  if (obj.educacion) {
+    if (obj.educacion["estudio s_secundarios"] !== undefined && obj.educacion.estudios_secundarios === undefined) {
+      obj.educacion.estudios_secundarios = obj.educacion["estudio s_secundarios"];
+      delete obj.educacion["estudio s_secundarios"];
+    }
+
+    if (obj.educacion["estudios_secundarios"] === undefined) {
+      obj.educacion.estudios_secundarios = null;
+    }
+  }
+
+  return obj;
 }
 
 async function getAirAndUV(lat, lon, advertencias) {
@@ -779,11 +802,11 @@ app.get("/demografia", async (req, res) => {
       getCompraventasINE(ctx, advertencias)
     ]);
 
-    res.json({
+    const salida = normalizarSalidaDemografia({
       ok: true,
       direccion_solicitada: direccion,
       direccion_localizada: geo.direccion_localizada,
-      nivel_dato: "municipio/provincia según disponibilidad de tabla",
+      nivel_dato: "municipio/provincia según disponibilidad tabla",
       municipio: geo.municipio,
       provincia: geo.provincia,
       comunidad: geo.comunidad,
@@ -815,6 +838,8 @@ app.get("/demografia", async (req, res) => {
       ],
       advertencias
     });
+
+    res.json(salida);
   } catch (e) {
     res.status(500).json({
       ok: false,
