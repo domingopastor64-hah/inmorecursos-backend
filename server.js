@@ -1,5 +1,5 @@
-import express from "express";
-import cors from "cors";
+const express = require("express");
+const cors = require("cors");
 
 const app = express();
 const PORT = process.env.PORT || 10000;
@@ -7,72 +7,61 @@ const PORT = process.env.PORT || 10000;
 app.use(cors());
 app.use(express.json());
 
+// TEST
 app.get("/", (req, res) => {
-  res.json({ ok: true, mensaje: "Servidor InmoRecursos funcionando" });
+  res.json({ ok: true, mensaje: "Servidor funcionando" });
 });
 
 app.get("/test-ruta", (req, res) => {
   res.json({ ok: true, mensaje: "RUTA OK" });
 });
 
-app.get("/api/euribor", async (req, res) => {
-  try {
-    res.json({
-      ok: true,
-      fuente: "Banco de España",
-      aviso: "Ruta funcionando. Pendiente de ajustar serie oficial definitiva del Euríbor.",
-      consulta: new Date().toISOString()
-    });
-  } catch (error) {
-    res.status(500).json({ ok: false, error: "Error Euríbor", detalle: error.message });
-  }
+// EURIBOR (mock inicial)
+app.get("/api/euribor", (req, res) => {
+  res.json({
+    ok: true,
+    valor: 3.65,
+    fecha: new Date().toISOString()
+  });
 });
 
+// ENTORNO (real Open-Meteo)
 app.get("/api/entorno", async (req, res) => {
-  const { lat, lon } = req.query;
-
-  if (!lat || !lon) {
-    return res.status(400).json({ ok: false, error: "Faltan lat y lon" });
-  }
-
   try {
-    const url =
-      `https://air-quality-api.open-meteo.com/v1/air-quality` +
-      `?latitude=${lat}&longitude=${lon}` +
-      `&current=pm10,pm2_5,nitrogen_dioxide,ozone,european_aqi,uv_index` +
-      `&timezone=auto`;
+    const { lat, lon } = req.query;
+
+    if (!lat || !lon) {
+      return res.status(400).json({ error: "Faltan lat/lon" });
+    }
+
+    const url = `https://air-quality-api.open-meteo.com/v1/air-quality?latitude=${lat}&longitude=${lon}&current=pm10,pm2_5,nitrogen_dioxide,ozone,european_aqi,uv_index`;
 
     const response = await fetch(url);
     const data = await response.json();
 
     res.json({
       ok: true,
-      fuente: "Open-Meteo Air Quality",
-      consulta: new Date().toISOString(),
-      datos: data.current || null
+      datos: data.current
     });
-  } catch (error) {
-    res.status(500).json({ ok: false, error: "Error entorno", detalle: error.message });
+
+  } catch (e) {
+    res.status(500).json({ error: "Error entorno" });
   }
 });
 
-app.get("/api/renta", async (req, res) => {
+// RENTA (mock inicial)
+app.get("/api/renta", (req, res) => {
   res.json({
     ok: true,
-    fuente: "INE",
-    aviso: "Ruta funcionando. Pendiente de conectar tabla INE exacta por territorio.",
-    consulta: new Date().toISOString()
+    renta_media: 18000
   });
 });
 
+// 404
 app.use((req, res) => {
-  res.status(404).json({
-    ok: false,
-    error: "Ruta no encontrada",
-    ruta_recibida: req.originalUrl
-  });
+  res.status(404).json({ error: "Ruta no encontrada" });
 });
 
 app.listen(PORT, () => {
-  console.log(`Servidor InmoRecursos funcionando en puerto ${PORT}`);
+  console.log("Servidor funcionando en puerto " + PORT);
 });
