@@ -1,3 +1,6 @@
+app.get("/test-ruta", (req, res) => {
+  res.json({ mensaje: "RUTA OK" });
+});
 import express from "express";
 import cors from "cors";
 
