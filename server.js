@@ -52,7 +52,7 @@ async function fetchJson(url, timeout = 18000, headers = {}) {
       signal: controller.signal,
       cache: "no-store",
       headers: {
-        "User-Agent": "InmoRecursos/3.0",
+        "User-Agent": "InmoRecursos/4.0",
         "Cache-Control": "no-cache",
         "Pragma": "no-cache",
         ...headers
@@ -61,9 +61,7 @@ async function fetchJson(url, timeout = 18000, headers = {}) {
 
     const text = await res.text();
 
-    if (!res.ok) {
-      throw new Error(`HTTP ${res.status}: ${text.slice(0, 250)}`);
-    }
+    if (!res.ok) throw new Error(`HTTP ${res.status}: ${text.slice(0, 250)}`);
 
     try {
       return JSON.parse(text);
@@ -75,7 +73,7 @@ async function fetchJson(url, timeout = 18000, headers = {}) {
   }
 }
 
-async function fetchText(url, timeout = 18000, headers = {}) {
+async function fetchText(url, timeout = 18000) {
   const controller = new AbortController();
   const id = setTimeout(() => controller.abort(), timeout);
 
@@ -88,18 +86,15 @@ async function fetchText(url, timeout = 18000, headers = {}) {
       signal: controller.signal,
       cache: "no-store",
       headers: {
-        "User-Agent": "InmoRecursos/3.0",
+        "User-Agent": "InmoRecursos/4.0",
         "Cache-Control": "no-cache",
-        "Pragma": "no-cache",
-        ...headers
+        "Pragma": "no-cache"
       }
     });
 
     const text = await res.text();
 
-    if (!res.ok) {
-      throw new Error(`HTTP ${res.status}: ${text.slice(0, 250)}`);
-    }
+    if (!res.ok) throw new Error(`HTTP ${res.status}: ${text.slice(0, 250)}`);
 
     return text;
   } finally {
@@ -109,6 +104,7 @@ async function fetchText(url, timeout = 18000, headers = {}) {
 
 function parseNumber(value) {
   if (value === null || value === undefined) return null;
+
   let s = String(value).trim();
   if (!s || s === "." || s === ".." || s === "-") return null;
 
@@ -126,6 +122,7 @@ function parseNumber(value) {
 
 function parseDate(value) {
   if (!value) return null;
+
   const s = String(value).trim();
 
   let m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
@@ -145,8 +142,7 @@ function parseDate(value) {
 }
 
 function iso(d) {
-  if (!d || Number.isNaN(d.getTime())) return null;
-  return d.toISOString().slice(0, 10);
+  return d && !Number.isNaN(d.getTime()) ? d.toISOString().slice(0, 10) : null;
 }
 
 function splitCsvLine(line, delimiter) {
@@ -183,24 +179,24 @@ function parseCsv(text) {
   return lines.map(line => splitCsvLine(line, delimiter));
 }
 
-function findLatestNumberInCsv(csvText, requiredWords = []) {
+function findLatestNumberInCsv(csvText, words = []) {
   const rows = parseCsv(csvText);
   if (!rows.length) throw new Error("CSV vacío.");
 
-  const words = requiredWords.map(w =>
+  const cleanWords = words.map(w =>
     String(w).toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "")
   );
 
   let columnIndex = -1;
 
-  for (let r = 0; r < Math.min(rows.length, 30); r++) {
+  for (let r = 0; r < Math.min(rows.length, 40); r++) {
     for (let c = 0; c < rows[r].length; c++) {
       const cell = String(rows[r][c] || "")
         .toLowerCase()
         .normalize("NFD")
         .replace(/[\u0300-\u036f]/g, "");
 
-      if (words.every(w => cell.includes(w))) {
+      if (cleanWords.every(w => cell.includes(w))) {
         columnIndex = c;
         break;
       }
@@ -217,7 +213,7 @@ function findLatestNumberInCsv(csvText, requiredWords = []) {
   for (const row of rows) {
     let date = null;
 
-    for (let c = 0; c < Math.min(5, row.length); c++) {
+    for (let c = 0; c < Math.min(6, row.length); c++) {
       date = parseDate(row[c]);
       if (date) break;
     }
@@ -234,15 +230,16 @@ function findLatestNumberInCsv(csvText, requiredWords = []) {
 
   candidates.sort((a, b) => new Date(b.fecha) - new Date(a.fecha));
 
-  if (!candidates.length) {
-    throw new Error("No se encontraron valores fechados válidos.");
-  }
+  if (!candidates.length) throw new Error("No se encontraron valores fechados válidos.");
 
   return candidates[0];
 }
 
 async function obtenerEuribor() {
-  const url = process.env.BDE_EURIBOR_CSV_URL || "https://www.bde.es/webbe/es/estadisticas/compartido/datos/csv/ti_1_7.csv";
+  const url =
+    process.env.BDE_EURIBOR_CSV_URL ||
+    "https://www.bde.es/webbe/es/estadisticas/compartido/datos/csv/ti_1_7.csv";
+
   const csv = await fetchText(url);
 
   let dato;
@@ -263,9 +260,7 @@ async function obtenerEuribor() {
 }
 
 async function geocodificar(direccion) {
-  if (!GEOAPIFY_KEY) {
-    throw new Error("Falta GEOAPIFY_KEY en Render.");
-  }
+  if (!GEOAPIFY_KEY) throw new Error("Falta GEOAPIFY_KEY en Render.");
 
   const url =
     `https://api.geoapify.com/v1/geocode/search?text=${encodeURIComponent(direccion)}` +
@@ -274,9 +269,7 @@ async function geocodificar(direccion) {
   const data = await fetchJson(url);
   const f = data.features?.[0];
 
-  if (!f) {
-    throw new Error("Geoapify no encontró la dirección.");
-  }
+  if (!f) throw new Error("Geoapify no encontró la dirección.");
 
   return {
     lat: Number(f.properties.lat),
@@ -290,9 +283,7 @@ async function geocodificar(direccion) {
 }
 
 async function obtenerServiciosGeoapify(lat, lon, radio = 500) {
-  if (!GEOAPIFY_KEY) {
-    throw new Error("Falta GEOAPIFY_KEY en Render.");
-  }
+  if (!GEOAPIFY_KEY) throw new Error("Falta GEOAPIFY_KEY en Render.");
 
   const categorias = [
     "commercial.supermarket",
@@ -300,13 +291,13 @@ async function obtenerServiciosGeoapify(lat, lon, radio = 500) {
     "education.school",
     "education.university",
     "healthcare.hospital",
-    "healthcare.clinic_or_praxis",
+    "healthcare.clinic_or_practice",
     "leisure.park",
     "public_transport",
     "catering.restaurant",
-    "commercial.marketplace",
     "service.financial.bank",
-    "service.vehicle.parking"
+    "service.vehicle.parking",
+    "commercial.shopping_mall"
   ];
 
   const url =
@@ -382,33 +373,28 @@ async function obtenerMeteoOpenMeteo(lat, lon) {
   };
 }
 
-async function obtenerRutaOpenRouteService(origen, destino) {
-  if (!OPENROUTESERVICE_KEY) {
-    return {
-      disponible: false,
-      aviso: "Falta OPENROUTESERVICE_KEY en Render."
-    };
-  }
-
-  const url = "https://api.openrouteservice.org/v2/directions/driving-car";
-
-  const data = await fetchJson(url, 18000, {
-    "Authorization": OPENROUTESERVICE_KEY,
-    "Content-Type": "application/json"
-  });
-
-  return data;
-}
+app.get("/", (req, res) => {
+  noCache(res);
+  res.send("InmoRecursos backend activo. Pruebe /health");
+});
 
 app.get("/health", (req, res) => {
   ok(res, {
     servicio: "InmoRecursos backend activo",
-    version: "3.0.0",
+    version: "4.0.0",
     claves: {
       AEMET_API_KEY: Boolean(AEMET_API_KEY),
       GEOAPIFY_KEY: Boolean(GEOAPIFY_KEY),
       OPENROUTESERVICE_KEY: Boolean(OPENROUTESERVICE_KEY)
-    }
+    },
+    rutas: [
+      "/financiero",
+      "/ctr",
+      "/entorno?direccion=...",
+      "/demografia?direccion=...",
+      "/api/euribor",
+      "/api/entorno?direccion=..."
+    ]
   });
 });
 
@@ -433,6 +419,15 @@ app.get("/financiero", async (req, res) => {
     });
   } catch (err) {
     fail(res, 500, "No se pudo obtener el dato financiero oficial.", err.message);
+  }
+});
+
+app.get("/api/euribor", async (req, res) => {
+  try {
+    const euribor = await obtenerEuribor();
+    ok(res, { euribor });
+  } catch (err) {
+    fail(res, 500, "No se pudo obtener el Euríbor.", err.message);
   }
 });
 
@@ -481,59 +476,76 @@ app.post("/ctr", (req, res) => {
   }
 });
 
+async function construirEntorno(direccion, radio) {
+  const geo = await geocodificar(direccion);
+
+  const [aireR, meteoR, serviciosR] = await Promise.allSettled([
+    obtenerAireOpenMeteo(geo.lat, geo.lon),
+    obtenerMeteoOpenMeteo(geo.lat, geo.lon),
+    obtenerServiciosGeoapify(geo.lat, geo.lon, radio)
+  ]);
+
+  const advertencias = [];
+
+  const aire = aireR.status === "fulfilled" ? aireR.value : null;
+  const meteo = meteoR.status === "fulfilled" ? meteoR.value : null;
+  const servicios = serviciosR.status === "fulfilled"
+    ? serviciosR.value
+    : { servicios_resumen: {}, servicios_con_direccion: [], fuente: "Geoapify Places" };
+
+  if (aireR.status === "rejected") advertencias.push(`Calidad del aire no disponible: ${aireR.reason.message}`);
+  if (meteoR.status === "rejected") advertencias.push(`Meteorología no disponible: ${meteoR.reason.message}`);
+  if (serviciosR.status === "rejected") advertencias.push(`Servicios cercanos no disponibles: ${serviciosR.reason.message}`);
+
+  return {
+    direccion_solicitada: direccion,
+    direccion_localizada: geo.direccion_localizada,
+    lat: geo.lat,
+    lon: geo.lon,
+    municipio: geo.municipio,
+    provincia: geo.provincia,
+    comunidad: geo.comunidad,
+    cp: geo.cp,
+    radio_m: radio,
+    fuente_geocodificacion: "Geoapify",
+    aire,
+    meteo,
+    radiacion: {
+      fuente: "Open-Meteo Air Quality",
+      fecha: aire?.fecha || null,
+      uv_index: aire?.uv_index ?? null
+    },
+    servicios_resumen: servicios.servicios_resumen,
+    servicios_con_direccion: servicios.servicios_con_direccion,
+    fuente_servicios: servicios.fuente || "Geoapify Places",
+    advertencias,
+    aviso: "Datos consultados en tiempo real. Si una fuente falla, se informa en advertencias."
+  };
+}
+
 app.get("/entorno", async (req, res) => {
   try {
     const direccion = String(req.query.direccion || "").trim();
     const radio = Number(req.query.radio || 500);
 
-    if (!direccion) {
-      return fail(res, 400, "Debe facilitar una dirección.");
-    }
+    if (!direccion) return fail(res, 400, "Debe facilitar una dirección.");
 
-    const geo = await geocodificar(direccion);
+    const data = await construirEntorno(direccion, radio);
+    ok(res, data);
+  } catch (err) {
+    fail(res, 500, "No se pudo consultar el entorno.", err.message);
+  }
+});
 
-    const [aireR, meteoR, serviciosR] = await Promise.allSettled([
-      obtenerAireOpenMeteo(geo.lat, geo.lon),
-      obtenerMeteoOpenMeteo(geo.lat, geo.lon),
-      obtenerServiciosGeoapify(geo.lat, geo.lon, radio)
-    ]);
+app.get("/api/entorno", async (req, res) => {
+  try {
+    const direccion = String(req.query.direccion || "").trim();
+    const radio = Number(req.query.radio || 500);
 
-    const advertencias = [];
+    if (!direccion) return fail(res, 400, "Debe facilitar una dirección.");
 
-    const aire = aireR.status === "fulfilled" ? aireR.value : null;
-    const meteo = meteoR.status === "fulfilled" ? meteoR.value : null;
-    const servicios = serviciosR.status === "fulfilled"
-      ? serviciosR.value
-      : { servicios_resumen: {}, servicios_con_direccion: [] };
-
-    if (aireR.status === "rejected") advertencias.push(`Calidad del aire no disponible: ${aireR.reason.message}`);
-    if (meteoR.status === "rejected") advertencias.push(`Meteorología no disponible: ${meteoR.reason.message}`);
-    if (serviciosR.status === "rejected") advertencias.push(`Servicios cercanos no disponibles: ${serviciosR.reason.message}`);
-
-    ok(res, {
-      direccion_solicitada: direccion,
-      direccion_localizada: geo.direccion_localizada,
-      lat: geo.lat,
-      lon: geo.lon,
-      municipio: geo.municipio,
-      provincia: geo.provincia,
-      comunidad: geo.comunidad,
-      cp: geo.cp,
-      radio_m: radio,
-      fuente_geocodificacion: "Geoapify",
-      aire,
-      meteo,
-      radiacion: {
-        fuente: "Open-Meteo Air Quality",
-        fecha: aire?.fecha || null,
-        uv_index: aire?.uv_index ?? null
-      },
-      servicios_resumen: servicios.servicios_resumen,
-      servicios_con_direccion: servicios.servicios_con_direccion,
-      fuente_servicios: servicios.fuente || "Geoapify Places",
-      advertencias,
-      aviso: "Datos consultados en tiempo real. Si una fuente falla, se informa en advertencias."
-    });
+    const data = await construirEntorno(direccion, radio);
+    ok(res, data);
   } catch (err) {
     fail(res, 500, "No se pudo consultar el entorno.", err.message);
   }
@@ -543,9 +555,7 @@ app.get("/demografia", async (req, res) => {
   try {
     const direccion = String(req.query.direccion || "").trim();
 
-    if (!direccion) {
-      return fail(res, 400, "Debe facilitar una dirección.");
-    }
+    if (!direccion) return fail(res, 400, "Debe facilitar una dirección.");
 
     const geo = await geocodificar(direccion);
 
@@ -564,9 +574,9 @@ app.get("/demografia", async (req, res) => {
         renta_unidad_consumo: null,
         fecha: null,
         fuente: "INE",
-        aviso: "La renta INE requiere mapear el territorio devuelto por Geoapify con el identificador oficial de la tabla INE. No se devuelven datos simulados."
+        aviso: "La renta INE requiere conectar la consulta oficial exacta. No se devuelven datos simulados."
       },
-      aviso: "Bloque operativo. Queda pendiente conectar la consulta exacta al INE para devolver renta real por territorio."
+      aviso: "Bloque operativo. Pendiente conectar renta real INE por identificador territorial."
     });
   } catch (err) {
     fail(res, 500, "No se pudo consultar demografía.", err.message);
@@ -574,7 +584,7 @@ app.get("/demografia", async (req, res) => {
 });
 
 app.use((req, res) => {
-  fail(res, 404, "Endpoint no encontrado.");
+  fail(res, 404, "Ruta no encontrada. Revise /health para ver rutas disponibles.");
 });
 
 app.listen(PORT, () => {
