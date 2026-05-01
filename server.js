@@ -4,31 +4,12 @@ import cors from "cors";
 const app = express();
 const PORT = process.env.PORT || 10000;
 
-app.use(cors({
-  origin: "*",
-  methods: ["GET", "POST", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization"]
-}));
+const AEMET_API_KEY = process.env.AEMET_API_KEY || "";
+const GEOAPIFY_KEY = process.env.GEOAPIFY_KEY || "";
+const OPENROUTESERVICE_KEY = process.env.OPENROUTESERVICE_KEY || "";
 
+app.use(cors({ origin: "*" }));
 app.use(express.json({ limit: "2mb" }));
-
-const CONFIG = {
-  BDE_EURIBOR_CSV_URL:
-    process.env.BDE_EURIBOR_CSV_URL ||
-    "https://www.bde.es/webbe/es/estadisticas/compartido/datos/csv/ti_1_7.csv",
-
-  BDE_TIPO_MEDIO_CSV_URL:
-    process.env.BDE_TIPO_MEDIO_CSV_URL || "",
-
-  AEMET_API_KEY:
-    process.env.AEMET_API_KEY || "",
-
-  GEOAPIFY_KEY:
-    process.env.GEOAPIFY_KEY || "",
-
-  INE_RENTA_TABLE_ID:
-    process.env.INE_RENTA_TABLE_ID || "30896"
-};
 
 function noCache(res) {
   res.set({
@@ -48,94 +29,19 @@ function ok(res, data) {
   });
 }
 
-function fail(res, status, message, detail = null) {
+function fail(res, status, error, detalle = null) {
   noCache(res);
   res.status(status).json({
     ok: false,
     consulta_realizada: new Date().toISOString(),
-    error: message,
-    detalle: detail
+    error,
+    detalle
   });
 }
 
-function parseNumberES(value) {
-  if (value === null || value === undefined) return null;
-  const clean = String(value)
-    .trim()
-    .replace(/\./g, "")
-    .replace(",", ".")
-    .replace("%", "");
-
-  const n = Number(clean);
-  return Number.isFinite(n) ? n : null;
-}
-
-function parseCsvLine(line, delimiter) {
-  const out = [];
-  let current = "";
-  let inQuotes = false;
-
-  for (let i = 0; i < line.length; i++) {
-    const char = line[i];
-    const next = line[i + 1];
-
-    if (char === '"' && inQuotes && next === '"') {
-      current += '"';
-      i++;
-    } else if (char === '"') {
-      inQuotes = !inQuotes;
-    } else if (char === delimiter && !inQuotes) {
-      out.push(current.trim());
-      current = "";
-    } else {
-      current += char;
-    }
-  }
-
-  out.push(current.trim());
-  return out.map(x => x.replace(/^"|"$/g, ""));
-}
-
-function parseCsv(text) {
-  const clean = text.replace(/\r/g, "");
-  const lines = clean.split("\n").filter(x => x.trim() !== "");
-  const sample = lines.slice(0, 10).join("\n");
-
-  const semis = (sample.match(/;/g) || []).length;
-  const commas = (sample.match(/,/g) || []).length;
-  const delimiter = semis >= commas ? ";" : ",";
-
-  return lines.map(line => parseCsvLine(line, delimiter));
-}
-
-function parseAnyDate(value) {
-  if (!value) return null;
-  const raw = String(value).trim();
-
-  let m = raw.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$/);
-  if (m) return new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3])));
-
-  m = raw.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{4})$/);
-  if (m) return new Date(Date.UTC(Number(m[3]), Number(m[2]) - 1, Number(m[1])));
-
-  m = raw.match(/^(\d{4})[-/](\d{1,2})$/);
-  if (m) return new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, 1));
-
-  m = raw.match(/^(\d{1,2})[-/](\d{4})$/);
-  if (m) return new Date(Date.UTC(Number(m[2]), Number(m[1]) - 1, 1));
-
-  const d = new Date(raw);
-  return Number.isNaN(d.getTime()) ? null : d;
-}
-
-function isoDate(d) {
-  if (!d || Number.isNaN(d.getTime())) return null;
-  return d.toISOString().slice(0, 10);
-}
-
-async function fetchText(url, timeoutMs = 15000) {
+async function fetchJson(url, timeout = 18000, headers = {}) {
   const controller = new AbortController();
-  const id = setTimeout(() => controller.abort(), timeoutMs);
+  const id = setTimeout(() => controller.abort(), timeout);
 
   try {
     const finalUrl = url.includes("?")
@@ -146,40 +52,9 @@ async function fetchText(url, timeoutMs = 15000) {
       signal: controller.signal,
       cache: "no-store",
       headers: {
+        "User-Agent": "InmoRecursos/3.0",
         "Cache-Control": "no-cache",
         "Pragma": "no-cache",
-        "User-Agent": "InmoRecursos/1.0"
-      }
-    });
-
-    const text = await res.text();
-
-    if (!res.ok) {
-      throw new Error(`HTTP ${res.status}: ${text.slice(0, 180)}`);
-    }
-
-    return text;
-  } finally {
-    clearTimeout(id);
-  }
-}
-
-async function fetchJson(url, timeoutMs = 15000, headers = {}) {
-  const controller = new AbortController();
-  const id = setTimeout(() => controller.abort(), timeoutMs);
-
-  try {
-    const finalUrl = url.includes("?")
-      ? `${url}&_t=${Date.now()}`
-      : `${url}?_t=${Date.now()}`;
-
-    const res = await fetch(finalUrl, {
-      signal: controller.signal,
-      cache: "no-store",
-      headers: {
-        "Cache-Control": "no-cache",
-        "Pragma": "no-cache",
-        "User-Agent": "InmoRecursos/1.0",
         ...headers
       }
     });
@@ -187,7 +62,7 @@ async function fetchJson(url, timeoutMs = 15000, headers = {}) {
     const text = await res.text();
 
     if (!res.ok) {
-      throw new Error(`HTTP ${res.status}: ${text.slice(0, 180)}`);
+      throw new Error(`HTTP ${res.status}: ${text.slice(0, 250)}`);
     }
 
     try {
@@ -200,39 +75,158 @@ async function fetchJson(url, timeoutMs = 15000, headers = {}) {
   }
 }
 
-function latestBdeValueFromCsv(csvText, keywords = []) {
+async function fetchText(url, timeout = 18000, headers = {}) {
+  const controller = new AbortController();
+  const id = setTimeout(() => controller.abort(), timeout);
+
+  try {
+    const finalUrl = url.includes("?")
+      ? `${url}&_t=${Date.now()}`
+      : `${url}?_t=${Date.now()}`;
+
+    const res = await fetch(finalUrl, {
+      signal: controller.signal,
+      cache: "no-store",
+      headers: {
+        "User-Agent": "InmoRecursos/3.0",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
+        ...headers
+      }
+    });
+
+    const text = await res.text();
+
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}: ${text.slice(0, 250)}`);
+    }
+
+    return text;
+  } finally {
+    clearTimeout(id);
+  }
+}
+
+function parseNumber(value) {
+  if (value === null || value === undefined) return null;
+  let s = String(value).trim();
+  if (!s || s === "." || s === ".." || s === "-") return null;
+
+  s = s.replace(/\s/g, "").replace("%", "");
+
+  if (s.includes(",") && s.includes(".")) {
+    s = s.replace(/\./g, "").replace(",", ".");
+  } else if (s.includes(",")) {
+    s = s.replace(",", ".");
+  }
+
+  const n = Number(s);
+  return Number.isFinite(n) ? n : null;
+}
+
+function parseDate(value) {
+  if (!value) return null;
+  const s = String(value).trim();
+
+  let m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+  if (m) return new Date(Date.UTC(+m[1], +m[2] - 1, +m[3]));
+
+  m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  if (m) return new Date(Date.UTC(+m[3], +m[2] - 1, +m[1]));
+
+  m = s.match(/^(\d{4})\/(\d{1,2})\/(\d{1,2})$/);
+  if (m) return new Date(Date.UTC(+m[1], +m[2] - 1, +m[3]));
+
+  m = s.match(/^(\d{4})-(\d{1,2})$/);
+  if (m) return new Date(Date.UTC(+m[1], +m[2] - 1, 1));
+
+  const d = new Date(s);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
+function iso(d) {
+  if (!d || Number.isNaN(d.getTime())) return null;
+  return d.toISOString().slice(0, 10);
+}
+
+function splitCsvLine(line, delimiter) {
+  const out = [];
+  let cur = "";
+  let quoted = false;
+
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    const nx = line[i + 1];
+
+    if (ch === '"' && quoted && nx === '"') {
+      cur += '"';
+      i++;
+    } else if (ch === '"') {
+      quoted = !quoted;
+    } else if (ch === delimiter && !quoted) {
+      out.push(cur.replace(/^"|"$/g, "").trim());
+      cur = "";
+    } else {
+      cur += ch;
+    }
+  }
+
+  out.push(cur.replace(/^"|"$/g, "").trim());
+  return out;
+}
+
+function parseCsv(text) {
+  const clean = text.replace(/\r/g, "");
+  const lines = clean.split("\n").filter(l => l.trim());
+  const sample = lines.slice(0, 20).join("\n");
+  const delimiter = (sample.match(/;/g) || []).length >= (sample.match(/,/g) || []).length ? ";" : ",";
+  return lines.map(line => splitCsvLine(line, delimiter));
+}
+
+function findLatestNumberInCsv(csvText, requiredWords = []) {
   const rows = parseCsv(csvText);
   if (!rows.length) throw new Error("CSV vacío.");
 
-  const normalizedKeywords = keywords.map(k => k.toLowerCase());
+  const words = requiredWords.map(w =>
+    String(w).toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+  );
 
-  let selectedColumn = -1;
+  let columnIndex = -1;
 
-  const scanRows = rows.slice(0, Math.min(12, rows.length));
-  for (const row of scanRows) {
-    for (let c = 0; c < row.length; c++) {
-      const cell = String(row[c] || "").toLowerCase();
-      if (normalizedKeywords.every(k => cell.includes(k))) {
-        selectedColumn = c;
+  for (let r = 0; r < Math.min(rows.length, 30); r++) {
+    for (let c = 0; c < rows[r].length; c++) {
+      const cell = String(rows[r][c] || "")
+        .toLowerCase()
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "");
+
+      if (words.every(w => cell.includes(w))) {
+        columnIndex = c;
         break;
       }
     }
-    if (selectedColumn >= 0) break;
+    if (columnIndex >= 0) break;
   }
 
-  if (selectedColumn < 0) {
-    throw new Error(`No se encontró columna con: ${keywords.join(", ")}`);
+  if (columnIndex < 0) {
+    throw new Error("No se encontró la columna solicitada en el CSV.");
   }
 
   const candidates = [];
 
   for (const row of rows) {
-    const date = parseAnyDate(row[0]);
-    const value = parseNumberES(row[selectedColumn]);
+    let date = null;
+
+    for (let c = 0; c < Math.min(5, row.length); c++) {
+      date = parseDate(row[c]);
+      if (date) break;
+    }
+
+    const value = parseNumber(row[columnIndex]);
 
     if (date && value !== null) {
       candidates.push({
-        fecha: isoDate(date),
+        fecha: iso(date),
         valor: value
       });
     }
@@ -241,244 +235,85 @@ function latestBdeValueFromCsv(csvText, keywords = []) {
   candidates.sort((a, b) => new Date(b.fecha) - new Date(a.fecha));
 
   if (!candidates.length) {
-    throw new Error("No se encontraron valores fechados válidos en el CSV.");
+    throw new Error("No se encontraron valores fechados válidos.");
   }
 
   return candidates[0];
 }
 
-async function obtenerUltimoEuriborOficial() {
-  const csv = await fetchText(CONFIG.BDE_EURIBOR_CSV_URL);
+async function obtenerEuribor() {
+  const url = process.env.BDE_EURIBOR_CSV_URL || "https://www.bde.es/webbe/es/estadisticas/compartido/datos/csv/ti_1_7.csv";
+  const csv = await fetchText(url);
 
   let dato;
   try {
-    dato = latestBdeValueFromCsv(csv, ["euríbor", "1 año"]);
+    dato = findLatestNumberInCsv(csv, ["euribor", "12"]);
   } catch {
-    dato = latestBdeValueFromCsv(csv, ["euribor", "1 año"]);
+    dato = findLatestNumberInCsv(csv, ["euribor"]);
   }
 
   return {
-    descripcion: "Euríbor a un año",
+    descripcion: "Euríbor",
     valor: dato.valor,
     fecha: dato.fecha,
     fuente: "Banco de España",
-    url_fuente: CONFIG.BDE_EURIBOR_CSV_URL,
-    tipo_dato: "Último dato oficial disponible en la serie publicada"
+    url_fuente: url,
+    tipo_dato: "Último dato oficial disponible localizado en la serie publicada"
   };
 }
-
-async function obtenerUltimoTipoMedioOficial() {
-  if (!CONFIG.BDE_TIPO_MEDIO_CSV_URL) {
-    return {
-      descripcion: "Tipo medio hipotecario",
-      valor: null,
-      fecha: null,
-      fuente: "Banco de España",
-      url_fuente: null,
-      aviso: "Debe configurar BDE_TIPO_MEDIO_CSV_URL con la serie oficial concreta del Banco de España."
-    };
-  }
-
-  const csv = await fetchText(CONFIG.BDE_TIPO_MEDIO_CSV_URL);
-
-  const dato = latestBdeValueFromCsv(csv, ["hipotec"]);
-
-  return {
-    descripcion: "Tipo medio hipotecario",
-    valor: dato.valor,
-    fecha: dato.fecha,
-    fuente: "Banco de España",
-    url_fuente: CONFIG.BDE_TIPO_MEDIO_CSV_URL,
-    tipo_dato: "Último dato oficial disponible en la serie publicada"
-  };
-}
-
-app.get("/health", (req, res) => {
-  ok(res, {
-    servicio: "InmoRecursos backend activo",
-    version: "1.0.0"
-  });
-});
-
-app.get("/financiero", async (req, res) => {
-  try {
-    const [euribor, tipoMedio] = await Promise.all([
-      obtenerUltimoEuriborOficial(),
-      obtenerUltimoTipoMedioOficial()
-    ]);
-
-    ok(res, {
-      financiero: {
-        fuente: "Banco de España",
-        consulta_realizada: new Date().toISOString(),
-        euribor,
-        tipo_medio_hipotecario: tipoMedio,
-        aviso: "Se muestra siempre el último dato oficial disponible publicado por el organismo emisor."
-      }
-    });
-  } catch (err) {
-    fail(res, 500, "No se pudo obtener el dato financiero oficial en tiempo real.", err.message);
-  }
-});
-
-app.post("/ctr", (req, res) => {
-  try {
-    const {
-      cuota,
-      anos,
-      ibi,
-      comunidad,
-      seguro,
-      suministros,
-      mantenimiento,
-      transporte
-    } = req.body || {};
-
-    const componentes = {
-      cuota_hipotecaria: Number(cuota) || 0,
-      ibi: ibi === null || ibi === undefined ? null : Number(ibi),
-      comunidad: comunidad === null || comunidad === undefined ? null : Number(comunidad),
-      seguro: seguro === null || seguro === undefined ? null : Number(seguro),
-      suministros: suministros === null || suministros === undefined ? null : Number(suministros),
-      mantenimiento: mantenimiento === null || mantenimiento === undefined ? null : Number(mantenimiento),
-      transporte: transporte === null || transporte === undefined || transporte === "" ? null : Number(transporte)
-    };
-
-    const advertencias = [];
-
-    for (const [k, v] of Object.entries(componentes)) {
-      if (v !== null && (!Number.isFinite(v) || v < 0)) {
-        advertencias.push(`El componente ${k} no es válido y no se ha incluido.`);
-        componentes[k] = null;
-      }
-    }
-
-    const ctrMensual = Object.values(componentes)
-      .filter(v => Number.isFinite(v))
-      .reduce((a, b) => a + b, 0);
-
-    const years = Number(anos) || 0;
-
-    ok(res, {
-      ctr: {
-        consulta_realizada: new Date().toISOString(),
-        fuente: "Cálculo propio a partir de datos introducidos por el usuario",
-        ctr_mensual: ctrMensual,
-        ctr_anual: ctrMensual * 12,
-        ctr_total_periodo: years > 0 ? ctrMensual * 12 * years : null,
-        componentes,
-        advertencias
-      }
-    });
-  } catch (err) {
-    fail(res, 500, "No se pudo calcular el CTR.", err.message);
-  }
-});
 
 async function geocodificar(direccion) {
-  if (!CONFIG.GEOAPIFY_KEY) {
-    throw new Error("Falta GEOAPIFY_KEY para geocodificar la dirección.");
+  if (!GEOAPIFY_KEY) {
+    throw new Error("Falta GEOAPIFY_KEY en Render.");
   }
 
   const url =
     `https://api.geoapify.com/v1/geocode/search?text=${encodeURIComponent(direccion)}` +
-    `&limit=1&lang=es&apiKey=${CONFIG.GEOAPIFY_KEY}`;
+    `&limit=1&lang=es&apiKey=${GEOAPIFY_KEY}`;
 
   const data = await fetchJson(url);
-
   const f = data.features?.[0];
-  if (!f) throw new Error("No se pudo geocodificar la dirección.");
+
+  if (!f) {
+    throw new Error("Geoapify no encontró la dirección.");
+  }
 
   return {
-    lat: f.properties.lat,
-    lon: f.properties.lon,
+    lat: Number(f.properties.lat),
+    lon: Number(f.properties.lon),
     direccion_localizada: f.properties.formatted,
     municipio: f.properties.city || f.properties.town || f.properties.village || null,
     provincia: f.properties.county || null,
-    comunidad: f.properties.state || null
+    comunidad: f.properties.state || null,
+    cp: f.properties.postcode || null
   };
 }
 
-async function obtenerAireOpenMeteo(lat, lon) {
-  const url =
-    `https://air-quality-api.open-meteo.com/v1/air-quality?latitude=${lat}&longitude=${lon}` +
-    `&hourly=pm10,pm2_5,nitrogen_dioxide,ozone,carbon_monoxide,sulphur_dioxide,european_aqi` +
-    `&timezone=auto&past_days=1&forecast_days=1`;
-
-  const data = await fetchJson(url);
-
-  const h = data.hourly || {};
-  const times = h.time || [];
-
-  if (!times.length) {
-    throw new Error("Open-Meteo no devolvió datos horarios de calidad del aire.");
-  }
-
-  const idx = times.length - 1;
-
-  return {
-    fuente: "Open-Meteo Air Quality",
-    fecha: times[idx],
-    pm2_5: h.pm2_5?.[idx] ?? null,
-    pm10: h.pm10?.[idx] ?? null,
-    no2: h.nitrogen_dioxide?.[idx] ?? null,
-    ozono: h.ozone?.[idx] ?? null,
-    co: h.carbon_monoxide?.[idx] ?? null,
-    so2: h.sulphur_dioxide?.[idx] ?? null,
-    aqi_europeo: h.european_aqi?.[idx] ?? null
-  };
-}
-
-async function obtenerMeteoOpenMeteo(lat, lon) {
-  const url =
-    `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}` +
-    `&current=temperature_2m,relative_humidity_2m,wind_speed_10m` +
-    `&daily=uv_index_max&timezone=auto&forecast_days=1`;
-
-  const data = await fetchJson(url);
-
-  return {
-    meteo: {
-      fuente: "Open-Meteo",
-      fecha: data.current?.time || null,
-      temperatura: data.current?.temperature_2m ?? null,
-      humedad_relativa: data.current?.relative_humidity_2m ?? null,
-      viento: data.current?.wind_speed_10m ?? null
-    },
-    radiacion: {
-      fuente: "Open-Meteo",
-      fecha: data.daily?.time?.[0] || null,
-      uv_index: data.daily?.uv_index_max?.[0] ?? null
-    }
-  };
-}
-
-async function obtenerServiciosGeoapify(lat, lon, radio) {
-  if (!CONFIG.GEOAPIFY_KEY) {
-    return {
-      fuente: "Geoapify",
-      aviso: "Falta GEOAPIFY_KEY. No se han consultado servicios cercanos.",
-      servicios_resumen: {},
-      servicios_con_direccion: []
-    };
+async function obtenerServiciosGeoapify(lat, lon, radio = 500) {
+  if (!GEOAPIFY_KEY) {
+    throw new Error("Falta GEOAPIFY_KEY en Render.");
   }
 
   const categorias = [
     "commercial.supermarket",
     "healthcare.pharmacy",
     "education.school",
+    "education.university",
     "healthcare.hospital",
     "healthcare.clinic_or_praxis",
     "leisure.park",
     "public_transport",
-    "catering.restaurant"
+    "catering.restaurant",
+    "commercial.marketplace",
+    "service.financial.bank",
+    "service.vehicle.parking"
   ];
 
   const url =
     `https://api.geoapify.com/v2/places?categories=${categorias.join(",")}` +
     `&filter=circle:${lon},${lat},${radio}` +
     `&bias=proximity:${lon},${lat}` +
-    `&limit=80&apiKey=${CONFIG.GEOAPIFY_KEY}`;
+    `&limit=80&apiKey=${GEOAPIFY_KEY}`;
 
   const data = await fetchJson(url);
 
@@ -487,13 +322,14 @@ async function obtenerServiciosGeoapify(lat, lon, radio) {
 
   for (const f of data.features || []) {
     const p = f.properties || {};
-    const tipo = (p.categories || [])[0] || "servicio";
+    const tipo = p.categories?.[0] || "servicio";
+
     resumen[tipo] = (resumen[tipo] || 0) + 1;
 
     lista.push({
       nombre: p.name || "Servicio",
       tipo,
-      direccion: p.formatted || null,
+      direccion: p.formatted || "Dirección no disponible",
       distancia_m: p.distance ?? null
     });
   }
@@ -504,6 +340,146 @@ async function obtenerServiciosGeoapify(lat, lon, radio) {
     servicios_con_direccion: lista
   };
 }
+
+async function obtenerAireOpenMeteo(lat, lon) {
+  const url =
+    `https://air-quality-api.open-meteo.com/v1/air-quality?latitude=${lat}&longitude=${lon}` +
+    `&current=pm10,pm2_5,carbon_monoxide,nitrogen_dioxide,sulphur_dioxide,ozone,european_aqi,uv_index` +
+    `&timezone=auto`;
+
+  const data = await fetchJson(url);
+  const c = data.current || {};
+
+  return {
+    fuente: "Open-Meteo Air Quality",
+    fecha: c.time || null,
+    pm2_5: c.pm2_5 ?? null,
+    pm10: c.pm10 ?? null,
+    no2: c.nitrogen_dioxide ?? null,
+    ozono: c.ozone ?? null,
+    co: c.carbon_monoxide ?? null,
+    so2: c.sulphur_dioxide ?? null,
+    aqi_europeo: c.european_aqi ?? null,
+    uv_index: c.uv_index ?? null
+  };
+}
+
+async function obtenerMeteoOpenMeteo(lat, lon) {
+  const url =
+    `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}` +
+    `&current=temperature_2m,relative_humidity_2m,wind_speed_10m` +
+    `&timezone=auto`;
+
+  const data = await fetchJson(url);
+  const c = data.current || {};
+
+  return {
+    fuente: "Open-Meteo",
+    fecha: c.time || null,
+    temperatura: c.temperature_2m ?? null,
+    humedad_relativa: c.relative_humidity_2m ?? null,
+    viento: c.wind_speed_10m ?? null
+  };
+}
+
+async function obtenerRutaOpenRouteService(origen, destino) {
+  if (!OPENROUTESERVICE_KEY) {
+    return {
+      disponible: false,
+      aviso: "Falta OPENROUTESERVICE_KEY en Render."
+    };
+  }
+
+  const url = "https://api.openrouteservice.org/v2/directions/driving-car";
+
+  const data = await fetchJson(url, 18000, {
+    "Authorization": OPENROUTESERVICE_KEY,
+    "Content-Type": "application/json"
+  });
+
+  return data;
+}
+
+app.get("/health", (req, res) => {
+  ok(res, {
+    servicio: "InmoRecursos backend activo",
+    version: "3.0.0",
+    claves: {
+      AEMET_API_KEY: Boolean(AEMET_API_KEY),
+      GEOAPIFY_KEY: Boolean(GEOAPIFY_KEY),
+      OPENROUTESERVICE_KEY: Boolean(OPENROUTESERVICE_KEY)
+    }
+  });
+});
+
+app.get("/financiero", async (req, res) => {
+  try {
+    const euribor = await obtenerEuribor();
+
+    ok(res, {
+      financiero: {
+        fuente: "Banco de España",
+        consulta_realizada: new Date().toISOString(),
+        euribor,
+        tipo_medio_hipotecario: {
+          descripcion: "Tipo medio hipotecario",
+          valor: null,
+          fecha: null,
+          fuente: "Banco de España",
+          aviso: "Pendiente de configurar la URL oficial concreta de la serie si desea mostrar este dato."
+        },
+        aviso: "Se devuelve el último dato oficial disponible localizado en la serie publicada."
+      }
+    });
+  } catch (err) {
+    fail(res, 500, "No se pudo obtener el dato financiero oficial.", err.message);
+  }
+});
+
+app.post("/ctr", (req, res) => {
+  try {
+    const b = req.body || {};
+
+    const componentes = {
+      cuota_hipotecaria: Number(b.cuota) || 0,
+      ibi: b.ibi === null || b.ibi === undefined || b.ibi === "" ? null : Number(b.ibi),
+      comunidad: b.comunidad === null || b.comunidad === undefined || b.comunidad === "" ? null : Number(b.comunidad),
+      seguro: b.seguro === null || b.seguro === undefined || b.seguro === "" ? null : Number(b.seguro),
+      suministros: b.suministros === null || b.suministros === undefined || b.suministros === "" ? null : Number(b.suministros),
+      mantenimiento: b.mantenimiento === null || b.mantenimiento === undefined || b.mantenimiento === "" ? null : Number(b.mantenimiento),
+      transporte: b.transporte === null || b.transporte === undefined || b.transporte === "" ? null : Number(b.transporte)
+    };
+
+    const advertencias = [];
+
+    for (const [k, v] of Object.entries(componentes)) {
+      if (v !== null && (!Number.isFinite(v) || v < 0)) {
+        componentes[k] = null;
+        advertencias.push(`El componente ${k} no es válido y no se ha incluido.`);
+      }
+    }
+
+    const ctrMensual = Object.values(componentes)
+      .filter(v => Number.isFinite(v))
+      .reduce((a, b) => a + b, 0);
+
+    const anos = Number(b.anos) || 0;
+
+    ok(res, {
+      ctr: {
+        fuente: "Cálculo propio a partir de datos introducidos por el usuario",
+        consulta_realizada: new Date().toISOString(),
+        ctr_mensual: ctrMensual,
+        ctr_anual: ctrMensual * 12,
+        ctr_total_periodo: anos > 0 ? ctrMensual * 12 * anos : null,
+        componentes,
+        advertencias
+      }
+    });
+  } catch (err) {
+    fail(res, 500, "No se pudo calcular CTR.", err.message);
+  }
+});
 
 app.get("/entorno", async (req, res) => {
   try {
@@ -516,7 +492,7 @@ app.get("/entorno", async (req, res) => {
 
     const geo = await geocodificar(direccion);
 
-    const [aireResult, meteoResult, serviciosResult] = await Promise.allSettled([
+    const [aireR, meteoR, serviciosR] = await Promise.allSettled([
       obtenerAireOpenMeteo(geo.lat, geo.lon),
       obtenerMeteoOpenMeteo(geo.lat, geo.lon),
       obtenerServiciosGeoapify(geo.lat, geo.lon, radio)
@@ -524,32 +500,15 @@ app.get("/entorno", async (req, res) => {
 
     const advertencias = [];
 
-    let aire = null;
-    let meteo = null;
-    let radiacion = null;
-    let servicios_resumen = {};
-    let servicios_con_direccion = [];
+    const aire = aireR.status === "fulfilled" ? aireR.value : null;
+    const meteo = meteoR.status === "fulfilled" ? meteoR.value : null;
+    const servicios = serviciosR.status === "fulfilled"
+      ? serviciosR.value
+      : { servicios_resumen: {}, servicios_con_direccion: [] };
 
-    if (aireResult.status === "fulfilled") {
-      aire = aireResult.value;
-    } else {
-      advertencias.push(`No se pudo consultar calidad del aire: ${aireResult.reason.message}`);
-    }
-
-    if (meteoResult.status === "fulfilled") {
-      meteo = meteoResult.value.meteo;
-      radiacion = meteoResult.value.radiacion;
-    } else {
-      advertencias.push(`No se pudo consultar meteorología/UV: ${meteoResult.reason.message}`);
-    }
-
-    if (serviciosResult.status === "fulfilled") {
-      servicios_resumen = serviciosResult.value.servicios_resumen;
-      servicios_con_direccion = serviciosResult.value.servicios_con_direccion;
-      if (serviciosResult.value.aviso) advertencias.push(serviciosResult.value.aviso);
-    } else {
-      advertencias.push(`No se pudo consultar servicios cercanos: ${serviciosResult.reason.message}`);
-    }
+    if (aireR.status === "rejected") advertencias.push(`Calidad del aire no disponible: ${aireR.reason.message}`);
+    if (meteoR.status === "rejected") advertencias.push(`Meteorología no disponible: ${meteoR.reason.message}`);
+    if (serviciosR.status === "rejected") advertencias.push(`Servicios cercanos no disponibles: ${serviciosR.reason.message}`);
 
     ok(res, {
       direccion_solicitada: direccion,
@@ -559,33 +518,26 @@ app.get("/entorno", async (req, res) => {
       municipio: geo.municipio,
       provincia: geo.provincia,
       comunidad: geo.comunidad,
+      cp: geo.cp,
       radio_m: radio,
       fuente_geocodificacion: "Geoapify",
       aire,
       meteo,
-      radiacion,
-      servicios_resumen,
-      servicios_con_direccion,
+      radiacion: {
+        fuente: "Open-Meteo Air Quality",
+        fecha: aire?.fecha || null,
+        uv_index: aire?.uv_index ?? null
+      },
+      servicios_resumen: servicios.servicios_resumen,
+      servicios_con_direccion: servicios.servicios_con_direccion,
+      fuente_servicios: servicios.fuente || "Geoapify Places",
       advertencias,
-      aviso: "Los datos ambientales se consultan en tiempo real. Si una fuente no responde, se informa expresamente."
+      aviso: "Datos consultados en tiempo real. Si una fuente falla, se informa en advertencias."
     });
   } catch (err) {
-    fail(res, 500, "No se pudo consultar el entorno en tiempo real.", err.message);
+    fail(res, 500, "No se pudo consultar el entorno.", err.message);
   }
 });
-
-async function obtenerRentaINEPorMunicipio(nombreMunicipio) {
-  return {
-    renta_media_persona: null,
-    renta_media_hogar: null,
-    renta_mediana: null,
-    renta_unidad_consumo: null,
-    fecha: null,
-    fuente: "INE",
-    aviso:
-      "El endpoint queda preparado para INE, pero necesita mapear municipio/sección censal con el identificador oficial de la tabla INE utilizada. No se devuelve ningún dato simulado."
-  };
-}
 
 app.get("/demografia", async (req, res) => {
   try {
@@ -596,7 +548,6 @@ app.get("/demografia", async (req, res) => {
     }
 
     const geo = await geocodificar(direccion);
-    const renta = await obtenerRentaINEPorMunicipio(geo.municipio);
 
     ok(res, {
       direccion_solicitada: direccion,
@@ -604,13 +555,21 @@ app.get("/demografia", async (req, res) => {
       municipio: geo.municipio,
       provincia: geo.provincia,
       comunidad: geo.comunidad,
+      cp: geo.cp,
       fuente_geocodificacion: "Geoapify",
-      renta,
-      aviso:
-        "La renta del INE no es diaria. Debe mostrarse como último dato oficial disponible, no como dato actualizado diariamente."
+      renta: {
+        renta_media_persona: null,
+        renta_media_hogar: null,
+        renta_mediana: null,
+        renta_unidad_consumo: null,
+        fecha: null,
+        fuente: "INE",
+        aviso: "La renta INE requiere mapear el territorio devuelto por Geoapify con el identificador oficial de la tabla INE. No se devuelven datos simulados."
+      },
+      aviso: "Bloque operativo. Queda pendiente conectar la consulta exacta al INE para devolver renta real por territorio."
     });
   } catch (err) {
-    fail(res, 500, "No se pudo consultar la demografía/renta oficial.", err.message);
+    fail(res, 500, "No se pudo consultar demografía.", err.message);
   }
 });
 
