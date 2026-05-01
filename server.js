@@ -46,7 +46,7 @@ async function fetchJson(url, timeoutMs = 18000, headers = {}) {
     const response = await fetch(finalUrl, {
       signal: controller.signal,
       headers: {
-        "User-Agent": "InmoRecursos/5.0",
+        "User-Agent": "InmoRecursos/5.1",
         "Cache-Control": "no-cache",
         ...headers
       }
@@ -66,193 +66,6 @@ async function fetchJson(url, timeoutMs = 18000, headers = {}) {
   } finally {
     clearTimeout(timer);
   }
-}
-
-async function fetchText(url, timeoutMs = 18000, headers = {}) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-
-  try {
-    const finalUrl = url.includes("?")
-      ? `${url}&_t=${Date.now()}`
-      : `${url}?_t=${Date.now()}`;
-
-    const response = await fetch(finalUrl, {
-      signal: controller.signal,
-      headers: {
-        "User-Agent": "InmoRecursos/5.0",
-        "Cache-Control": "no-cache",
-        ...headers
-      }
-    });
-
-    const text = await response.text();
-
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}: ${text.slice(0, 250)}`);
-    }
-
-    return text;
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-function parseNumero(valor) {
-  if (valor === null || valor === undefined) return null;
-
-  let s = String(valor).trim();
-  if (!s || s === "." || s === ".." || s === "-") return null;
-
-  s = s.replace(/\s/g, "").replace("%", "");
-
-  if (s.includes(",") && s.includes(".")) {
-    s = s.replace(/\./g, "").replace(",", ".");
-  } else if (s.includes(",")) {
-    s = s.replace(",", ".");
-  }
-
-  const n = Number(s);
-  return Number.isFinite(n) ? n : null;
-}
-
-function parseFecha(valor) {
-  if (!valor) return null;
-
-  const s = String(valor).trim();
-
-  let m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
-  if (m) return new Date(Date.UTC(+m[1], +m[2] - 1, +m[3]));
-
-  m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
-  if (m) return new Date(Date.UTC(+m[3], +m[2] - 1, +m[1]));
-
-  m = s.match(/^(\d{4})-(\d{1,2})$/);
-  if (m) return new Date(Date.UTC(+m[1], +m[2] - 1, 1));
-
-  const d = new Date(s);
-  return Number.isNaN(d.getTime()) ? null : d;
-}
-
-function fechaISO(d) {
-  if (!d || Number.isNaN(d.getTime())) return null;
-  return d.toISOString().slice(0, 10);
-}
-
-function partirCsvLinea(linea, separador) {
-  const salida = [];
-  let actual = "";
-  let comillas = false;
-
-  for (let i = 0; i < linea.length; i++) {
-    const ch = linea[i];
-    const nx = linea[i + 1];
-
-    if (ch === '"' && comillas && nx === '"') {
-      actual += '"';
-      i++;
-    } else if (ch === '"') {
-      comillas = !comillas;
-    } else if (ch === separador && !comillas) {
-      salida.push(actual.replace(/^"|"$/g, "").trim());
-      actual = "";
-    } else {
-      actual += ch;
-    }
-  }
-
-  salida.push(actual.replace(/^"|"$/g, "").trim());
-  return salida;
-}
-
-function parseCsv(texto) {
-  const limpio = texto.replace(/\r/g, "");
-  const lineas = limpio.split("\n").filter(l => l.trim());
-  const muestra = lineas.slice(0, 20).join("\n");
-  const separador = (muestra.match(/;/g) || []).length >= (muestra.match(/,/g) || []).length ? ";" : ",";
-  return lineas.map(linea => partirCsvLinea(linea, separador));
-}
-
-function buscarUltimoDatoCsv(csvText, palabras = []) {
-  const filas = parseCsv(csvText);
-  if (!filas.length) throw new Error("CSV vacío.");
-
-  const claves = palabras.map(p =>
-    String(p).toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "")
-  );
-
-  let columna = -1;
-
-  for (let r = 0; r < Math.min(filas.length, 60); r++) {
-    for (let c = 0; c < filas[r].length; c++) {
-      const celda = String(filas[r][c] || "")
-        .toLowerCase()
-        .normalize("NFD")
-        .replace(/[\u0300-\u036f]/g, "");
-
-      if (claves.every(k => celda.includes(k))) {
-        columna = c;
-        break;
-      }
-    }
-    if (columna >= 0) break;
-  }
-
-  if (columna < 0) {
-    throw new Error("No se encontró la columna solicitada en el CSV.");
-  }
-
-  const candidatos = [];
-
-  for (const fila of filas) {
-    let fecha = null;
-
-    for (let c = 0; c < Math.min(8, fila.length); c++) {
-      fecha = parseFecha(fila[c]);
-      if (fecha) break;
-    }
-
-    const valor = parseNumero(fila[columna]);
-
-    if (fecha && valor !== null) {
-      candidatos.push({
-        fecha: fechaISO(fecha),
-        valor
-      });
-    }
-  }
-
-  candidatos.sort((a, b) => new Date(b.fecha) - new Date(a.fecha));
-
-  if (!candidatos.length) {
-    throw new Error("No se encontraron valores fechados válidos.");
-  }
-
-  return candidatos[0];
-}
-
-async function obtenerEuriborBdE() {
-  const url =
-    process.env.BDE_EURIBOR_CSV_URL ||
-    "https://www.bde.es/webbe/es/estadisticas/compartido/datos/csv/ti_1_7.csv";
-
-  const csv = await fetchText(url);
-
-  let dato;
-  try {
-    dato = buscarUltimoDatoCsv(csv, ["euribor", "12"]);
-  } catch {
-    dato = buscarUltimoDatoCsv(csv, ["euribor"]);
-  }
-
-  return {
-    descripcion: "Euríbor",
-    valor: dato.valor,
-    fecha: dato.fecha,
-    fuente: "Banco de España",
-    url_fuente: url,
-    tipo_dato: "Último dato oficial disponible localizado en CSV de series temporales"
-  };
 }
 
 async function geocodificarDireccion(direccion) {
@@ -293,7 +106,6 @@ async function serviciosGeoapify(lat, lon, radio = 500) {
     "education.school",
     "education.university",
     "healthcare.hospital",
-    "healthcare.clinic_or_practice",
     "leisure.park",
     "public_transport",
     "catering.restaurant",
@@ -380,6 +192,7 @@ function interpretarAire(aire) {
     return {
       puntuacion: null,
       estado: "Sin datos",
+      alertas: [],
       lectura: "No se han podido obtener datos ambientales."
     };
   }
@@ -453,11 +266,12 @@ function interpretarServicios(resumen) {
   };
 }
 
-function construirLecturaEntorno(aire, servicios) {
-  const la = interpretarAire(aire);
-  const ls = interpretarServicios(servicios);
+function construirLecturaEntorno(aire, serviciosResumen) {
+  const lecturaAire = interpretarAire(aire);
+  const lecturaServicios = interpretarServicios(serviciosResumen);
 
-  const scores = [la.puntuacion, ls.puntuacion].filter(Number.isFinite);
+  const scores = [lecturaAire.puntuacion, lecturaServicios.puntuacion].filter(Number.isFinite);
+
   const global = scores.length
     ? Math.round(scores.reduce((a, b) => a + b, 0) / scores.length)
     : null;
@@ -470,8 +284,8 @@ function construirLecturaEntorno(aire, servicios) {
   return {
     puntuacion_global: global,
     estado_global: estado,
-    aire: la,
-    servicios: ls,
+    aire: lecturaAire,
+    servicios: lecturaServicios,
     lectura:
       estado === "Favorable"
         ? "El entorno acompaña razonablemente la decisión: buena lectura ambiental y cobertura suficiente de servicios."
@@ -509,13 +323,26 @@ async function construirEntorno({ direccion, lat, lon, radio }) {
 
   const aire = aireR.status === "fulfilled" ? aireR.value : null;
   const meteo = meteoR.status === "fulfilled" ? meteoR.value : null;
+
   const servicios = serviciosR.status === "fulfilled"
     ? serviciosR.value
-    : { servicios_resumen: {}, servicios_con_direccion: [], fuente: "Geoapify Places" };
+    : {
+        servicios_resumen: {},
+        servicios_con_direccion: [],
+        fuente: "Geoapify Places"
+      };
 
-  if (aireR.status === "rejected") advertencias.push(`Calidad del aire no disponible: ${aireR.reason.message}`);
-  if (meteoR.status === "rejected") advertencias.push(`Meteorología no disponible: ${meteoR.reason.message}`);
-  if (serviciosR.status === "rejected") advertencias.push(`Servicios cercanos no disponibles: ${serviciosR.reason.message}`);
+  if (aireR.status === "rejected") {
+    advertencias.push(`Calidad del aire no disponible: ${aireR.reason.message}`);
+  }
+
+  if (meteoR.status === "rejected") {
+    advertencias.push(`Meteorología no disponible: ${meteoR.reason.message}`);
+  }
+
+  if (serviciosR.status === "rejected") {
+    advertencias.push(`Servicios cercanos no disponibles: ${serviciosR.reason.message}`);
+  }
 
   const lectura = construirLecturaEntorno(aire, servicios.servicios_resumen);
 
@@ -545,17 +372,27 @@ async function construirEntorno({ direccion, lat, lon, radio }) {
   };
 }
 
+function euriborOperativo() {
+  return {
+    descripcion: "Euríbor",
+    valor: null,
+    fecha: null,
+    fuente: "Banco de España",
+    aviso: "Ruta operativa. Falta fijar la serie exacta del Banco de España para lectura automática estable. No se devuelve dato simulado."
+  };
+}
+
 app.get("/", (req, res) => {
   ok(res, {
     servicio: "InmoRecursos backend profesional",
-    version: "5.0.0",
+    version: "5.1.0",
     rutas: [
       "/health",
       "/test-ruta",
       "/api/euribor",
       "/api/entorno?lat=40.03&lon=-6.08",
       "/api/entorno?direccion=...",
-      "/api/renta?lat=40.03&lon=-6.08",
+      "/api/renta",
       "/financiero",
       "/entorno",
       "/demografia",
@@ -567,7 +404,7 @@ app.get("/", (req, res) => {
 app.get("/health", (req, res) => {
   ok(res, {
     estado: "activo",
-    version: "5.0.0",
+    version: "5.1.0",
     claves: {
       GEOAPIFY_KEY: Boolean(GEOAPIFY_KEY),
       AEMET_API_KEY: Boolean(AEMET_API_KEY),
@@ -580,34 +417,24 @@ app.get("/test-ruta", (req, res) => {
   ok(res, { mensaje: "RUTA OK" });
 });
 
-app.get("/api/euribor", async (req, res) => {
-  try {
-    const euribor = await obtenerEuriborBdE();
-    ok(res, { euribor });
-  } catch (e) {
-    error(res, 500, "No se pudo obtener el Euríbor oficial.", e.message);
-  }
+app.get("/api/euribor", (req, res) => {
+  ok(res, { euribor: euriborOperativo() });
 });
 
-app.get("/financiero", async (req, res) => {
-  try {
-    const euribor = await obtenerEuriborBdE();
-    ok(res, {
-      financiero: {
+app.get("/financiero", (req, res) => {
+  ok(res, {
+    financiero: {
+      fuente: "Banco de España",
+      euribor: euriborOperativo(),
+      tipo_medio_hipotecario: {
+        descripcion: "Tipo medio hipotecario",
+        valor: null,
+        fecha: null,
         fuente: "Banco de España",
-        euribor,
-        tipo_medio_hipotecario: {
-          descripcion: "Tipo medio hipotecario",
-          valor: null,
-          fecha: null,
-          fuente: "Banco de España",
-          aviso: "Pendiente de configurar la serie oficial concreta del tipo medio hipotecario."
-        }
+        aviso: "Pendiente de configurar la serie oficial concreta del tipo medio hipotecario. No se devuelve dato simulado."
       }
-    });
-  } catch (e) {
-    error(res, 500, "No se pudo obtener el contexto financiero.", e.message);
-  }
+    }
+  });
 });
 
 app.get("/api/entorno", async (req, res) => {
@@ -640,7 +467,7 @@ app.get("/entorno", async (req, res) => {
   }
 });
 
-app.get("/api/renta", async (req, res) => {
+app.get("/api/renta", (req, res) => {
   ok(res, {
     renta: {
       renta_media_persona: null,
@@ -649,8 +476,7 @@ app.get("/api/renta", async (req, res) => {
       renta_unidad_consumo: null,
       fecha: null,
       fuente: "INE",
-      aviso:
-        "Ruta activa. Para devolver renta real se necesita mapear coordenadas/dirección con el código territorial exacto de la tabla INE correspondiente. No se devuelve renta simulada."
+      aviso: "Ruta activa. Para devolver renta real se necesita mapear coordenadas/dirección con el código territorial exacto de la tabla INE correspondiente. No se devuelve renta simulada."
     }
   });
 });
@@ -678,8 +504,7 @@ app.get("/demografia", async (req, res) => {
         renta_unidad_consumo: null,
         fecha: null,
         fuente: "INE",
-        aviso:
-          "Ruta activa. Pendiente mapear el territorio a identificador INE exacto. No se devuelven datos inventados."
+        aviso: "Ruta activa. Pendiente mapear el territorio a identificador INE exacto. No se devuelven datos inventados."
       }
     });
   } catch (e) {
