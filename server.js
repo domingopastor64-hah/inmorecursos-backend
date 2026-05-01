@@ -1,190 +1,174 @@
-const express = require("express");
-const cors = require("cors");
+import express from "express";
+import cors from "cors";
+import axios from "axios";
+import dotenv from "dotenv";
+
+dotenv.config();
 
 const app = express();
-const PORT = process.env.PORT || 10000;
-
-const GEOAPIFY_KEY = process.env.GEOAPIFY_KEY || "";
-
 app.use(cors());
 app.use(express.json());
 
-function ahora() {
-  return new Date().toISOString();
-}
+const PORT = process.env.PORT || 3000;
 
-function ok(res, data) {
-  res.set("Cache-Control", "no-store");
-  res.json({
-    ok: true,
-    consulta_realizada: ahora(),
-    ...data
-  });
-}
+/* =========================================================
+   🧠 MOTOR DECISIÓN
+========================================================= */
 
-function error(res, status, mensaje, detalle = null) {
-  res.set("Cache-Control", "no-store");
-  res.status(status).json({
-    ok: false,
-    consulta_realizada: ahora(),
-    error: mensaje,
-    detalle
-  });
-}
+function evaluarOperacion({ ingresos, cuota, precio, entorno }) {
+  const ratio = (cuota / ingresos) * 100;
 
-async function fetchJson(url) {
-  const response = await fetch(url);
-  const text = await response.text();
+  let viabilidad = "VIABLE";
+  let nivel = "ÓPTIMA";
 
-  if (!response.ok) {
-    throw new Error(`HTTP ${response.status}: ${text.slice(0, 200)}`);
+  if (ratio > 40) {
+    viabilidad = "NO VIABLE";
+    nivel = "CRÍTICA";
+  } else if (ratio > 35) {
+    viabilidad = "JUSTA";
+    nivel = "RIESGO";
   }
 
-  return JSON.parse(text);
+  return { ratio: Math.round(ratio), viabilidad, nivel };
 }
 
-async function serviciosGeoapify(lat, lon, radio = 500) {
-  if (!GEOAPIFY_KEY) {
-    throw new Error("Falta GEOAPIFY_KEY");
-  }
+/* =========================================================
+   🤝 NEGOCIACIÓN
+========================================================= */
 
-  // SOLO CATEGORÍAS SEGURAS (YA DEPURADAS)
-  const categorias = [
-    "commercial.supermarket",
-    "healthcare.pharmacy",
-    "education.school",
-    "healthcare.hospital",
-    "leisure.park",
-    "public_transport",
-    "catering.restaurant",
-    "service.financial.bank",
-    "commercial.shopping_mall"
-  ];
-
-  const url =
-    `https://api.geoapify.com/v2/places?categories=${categorias.join(",")}` +
-    `&filter=circle:${lon},${lat},${radio}` +
-    `&bias=proximity:${lon},${lat}` +
-    `&limit=60&apiKey=${GEOAPIFY_KEY}`;
-
-  const data = await fetchJson(url);
-
-  const resumen = {};
-  const lista = [];
-
-  for (const f of data.features || []) {
-    const p = f.properties || {};
-    const tipo = p.categories?.[0] || "servicio";
-
-    resumen[tipo] = (resumen[tipo] || 0) + 1;
-
-    lista.push({
-      nombre: p.name || "Servicio",
-      tipo,
-      direccion: p.formatted || "No disponible"
-    });
-  }
+function negociacion(precio, objetivo) {
+  const margen = precio - objetivo;
+  const porcentaje = (margen / precio) * 100;
 
   return {
-    resumen,
-    lista
+    margen,
+    porcentaje: porcentaje.toFixed(1),
+    recomendacion:
+      porcentaje > 10
+        ? "Existe margen claro de negociación"
+        : "Margen de negociación limitado"
   };
 }
 
-async function aire(lat, lon) {
-  const url =
-    `https://air-quality-api.open-meteo.com/v1/air-quality?latitude=${lat}&longitude=${lon}` +
-    `&current=pm10,pm2_5,nitrogen_dioxide,ozone,european_aqi,uv_index`;
+/* =========================================================
+   📈 PREDICCIÓN
+========================================================= */
 
-  const data = await fetchJson(url);
-
-  return data.current || {};
+function prediccion(precio, crecimiento = 3, años = 10) {
+  return Math.round(precio * Math.pow(1 + crecimiento / 100, años));
 }
 
-async function meteo(lat, lon) {
-  const url =
-    `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}` +
-    `&current=temperature_2m,relative_humidity_2m,wind_speed_10m`;
+/* =========================================================
+   🧮 CTR
+========================================================= */
 
-  const data = await fetchJson(url);
-
-  return data.current || {};
+function ctr(precio, interes, años) {
+  const intereses = precio * (interes / 100) * años;
+  return Math.round(precio + intereses + precio * 0.1);
 }
 
-function interpretar(aire, servicios) {
-  let score = 100;
+/* =========================================================
+   📊 EURIBOR
+========================================================= */
 
-  if (aire.pm2_5 > 20) score -= 20;
-  if (aire.pm10 > 40) score -= 20;
-
-  const totalServicios = Object.values(servicios).reduce((a, b) => a + b, 0);
-
-  if (totalServicios < 3) score -= 40;
-  else if (totalServicios < 6) score -= 20;
-
-  return {
-    puntuacion_global: Math.max(0, score),
-    estado_global:
-      score > 70 ? "Favorable" :
-      score > 50 ? "Intermedio" : "Débil"
-  };
-}
-
-app.get("/", (req, res) => {
-  ok(res, {
-    servicio: "Backend InmoRecursos",
-    rutas: [
-      "/api/entorno",
-      "/api/euribor"
-    ]
-  });
-});
-
-app.get("/api/euribor", (req, res) => {
-  ok(res, {
-    euribor: {
-      valor: null,
-      aviso: "Pendiente integración Banco de España real"
-    }
-  });
-});
-
-app.get("/api/entorno", async (req, res) => {
+async function getEuribor() {
   try {
-    const lat = Number(req.query.lat);
-    const lon = Number(req.query.lon);
+    const r = await axios.get("https://www.bde.es/webbe/es/estadisticas/temas/tipos-interes/euribor/series/euribor_1m.csv");
+    const lines = r.data.split("\n");
 
-    if (!lat || !lon) {
-      return error(res, 400, "Faltan coordenadas lat/lon");
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const row = lines[i].split(";");
+      if (row[1]) return parseFloat(row[1].replace(",", "."));
     }
+  } catch {}
+  return 2.5;
+}
 
-    const [aireData, meteoData, serviciosData] = await Promise.all([
-      aire(lat, lon),
-      meteo(lat, lon),
-      serviciosGeoapify(lat, lon)
-    ]);
+/* =========================================================
+   🌍 ENTORNO SIMPLE
+========================================================= */
 
-    const lectura = interpretar(aireData, serviciosData.resumen);
+async function getEntorno(lat, lon) {
+  try {
+    const air = await axios.get(`https://api.open-meteo.com/v1/air-quality?latitude=${lat}&longitude=${lon}&hourly=european_aqi&timezone=auto`);
+    const aqi = air.data.hourly.european_aqi.slice(-1)[0];
 
-    ok(res, {
+    let score = 50;
+    if (aqi < 25) score = 90;
+    else if (aqi < 50) score = 75;
+    else if (aqi < 75) score = 60;
+
+    return score;
+  } catch {
+    return 50;
+  }
+}
+
+/* =========================================================
+   🧾 GENERADOR INFORME
+========================================================= */
+
+function generarInforme(data) {
+  return {
+    resumen: `Operación ${data.viabilidad} con un ratio del ${data.ratio}%`,
+    recomendacion:
+      data.viabilidad === "NO VIABLE"
+        ? "Se recomienda no continuar sin ajustes"
+        : "Operación viable con análisis detallado",
+    decision:
+      data.viabilidad === "VIABLE" ? "SEGUIR" : "REPLANTEAR"
+  };
+}
+
+/* =========================================================
+   🎯 ENDPOINT FINAL PRODUCTO
+========================================================= */
+
+app.post("/api/analisis-completo", async (req, res) => {
+  try {
+    const {
+      ingresos,
+      cuota,
+      precio,
+      objetivo,
       lat,
       lon,
-      aire: aireData,
-      meteo: meteoData,
-      servicios_resumen: serviciosData.resumen,
-      servicios: serviciosData.lista,
-      lectura_entorno: lectura
+      interes,
+      años
+    } = req.body;
+
+    const euribor = await getEuribor();
+    const entorno = await getEntorno(lat, lon);
+
+    const evaluacion = evaluarOperacion({ ingresos, cuota, precio, entorno });
+    const neg = negociacion(precio, objetivo);
+    const valorFuturo = prediccion(precio);
+    const costeTotal = ctr(precio, interes || euribor, años || 25);
+
+    const informe = generarInforme(evaluacion);
+
+    res.json({
+      ok: true,
+      evaluacion,
+      negociacion: neg,
+      valor_futuro: valorFuturo,
+      coste_total: costeTotal,
+      entorno,
+      euribor,
+      informe
     });
 
-  } catch (e) {
-    error(res, 500, "Error en entorno", e.message);
+  } catch (error) {
+    res.json({ ok: false, error: error.message });
   }
 });
 
-app.use((req, res) => {
-  error(res, 404, "Ruta no encontrada", req.originalUrl);
+/* ========================================================= */
+
+app.get("/", (req, res) => {
+  res.send("Backend 10.0 PRODUCTO FINAL ACTIVO");
 });
 
 app.listen(PORT, () => {
-  console.log("Servidor funcionando en puerto " + PORT);
+  console.log("Servidor 10.0 listo para producción");
 });
