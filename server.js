@@ -12,29 +12,63 @@ app.use(express.json());
 const PORT = process.env.PORT || 3000;
 const GEOAPIFY_KEY = process.env.GEOAPIFY_KEY;
 
-function okNum(v){ return Number.isFinite(Number(v)); }
+/* =========================================================
+   UTILIDADES
+========================================================= */
 
-function ultimoValido(arr){
+function okNum(v){
+  return Number.isFinite(Number(v));
+}
+
+function indiceActual(times, values){
+  if(!Array.isArray(times) || !Array.isArray(values)) return -1;
+
+  const ahora = new Date();
+  let mejor = -1;
+  let menorDiferencia = Infinity;
+
+  for(let i=0;i<times.length;i++){
+    if(!okNum(values[i])) continue;
+
+    const fecha = new Date(times[i]);
+    if(isNaN(fecha.getTime())) continue;
+
+    const diferencia = Math.abs(ahora - fecha);
+
+    if(diferencia < menorDiferencia){
+      menorDiferencia = diferencia;
+      mejor = i;
+    }
+  }
+
+  return mejor;
+}
+
+function ultimoValido(arr, times=null){
   if(!Array.isArray(arr)) return null;
+
+  if(times){
+    const i = indiceActual(times, arr);
+    if(i >= 0) return Number(arr[i]);
+  }
+
   for(let i=arr.length-1;i>=0;i--){
     if(okNum(arr[i])) return Number(arr[i]);
   }
+
   return null;
 }
 
 function ultimaFecha(times, values){
-  if(!Array.isArray(times) || !Array.isArray(values)) return null;
-  for(let i=values.length-1;i>=0;i--){
-    if(okNum(values[i])) return times[i] || null;
-  }
-  return null;
+  const i = indiceActual(times, values);
+  return i >= 0 ? times[i] : null;
 }
 
 async function geocodificarDireccion(direccion){
   if(!GEOAPIFY_KEY) throw new Error("Falta GEOAPIFY_KEY en Render");
 
   const url = `https://api.geoapify.com/v1/geocode/search?text=${encodeURIComponent(direccion)}&limit=1&apiKey=${GEOAPIFY_KEY}`;
-  const r = await axios.get(url);
+  const r = await axios.get(url, { timeout: 15000 });
   const f = r.data?.features?.[0];
 
   if(!f) throw new Error("No se pudo geocodificar la dirección");
@@ -78,44 +112,39 @@ app.get("/api/health", (req,res)=>{
 });
 
 /* =========================================================
-   EURÍBOR / BANCO DE ESPAÑA
+   EURÍBOR REAL - BANCO DE ESPAÑA
 ========================================================= */
 
 app.get("/api/euribor", async (req,res)=>{
   try{
-    const urls = [
-      "https://www.bde.es/webbe/es/estadisticas/temas/tipos-interes/euribor/series/euribor_1m.csv",
-      "https://www.bde.es/webbe/es/estadisticas/temas/tipos-interes/euribor/series/euribor_12m.csv"
-    ];
+    const url = "https://www.bde.es/webbe/es/estadisticas/compartido/datos/csv/ti_1_7.csv";
+
+    const r = await axios.get(url, { timeout: 15000 });
+    const texto = String(r.data || "");
+    const lineas = texto.split(/\r?\n/).filter(Boolean);
 
     let valor = null;
     let fecha = null;
 
-    for(const url of urls){
-      try{
-        const r = await axios.get(url, { timeout: 15000 });
-        const texto = String(r.data || "");
-        const lineas = texto.split(/\r?\n/).filter(Boolean);
+    for(let i=lineas.length-1;i>=0;i--){
+      const cols = lineas[i].split(";").map(x=>x.trim().replace(/^"|"$/g,""));
 
-        for(let i=lineas.length-1;i>=0;i--){
-          const cols = lineas[i].split(/[;,]/).map(x=>x.trim().replace(/^"|"$/g,""));
-          for(let c=1;c<cols.length;c++){
-            const posible = cols[c].replace(",", ".");
-            if(okNum(posible)){
-              valor = Number(posible);
-              fecha = cols[0];
-              break;
-            }
-          }
-          if(valor !== null) break;
+      const posibleFecha = cols[0];
+
+      for(let c=cols.length-1;c>=1;c--){
+        const posibleValor = cols[c].replace(",", ".");
+        if(Number.isFinite(Number(posibleValor))){
+          valor = Number(posibleValor);
+          fecha = posibleFecha;
+          break;
         }
+      }
 
-        if(valor !== null) break;
-      }catch(e){}
+      if(valor !== null) break;
     }
 
     if(valor === null){
-      throw new Error("No se pudo leer el CSV del Banco de España");
+      throw new Error("No se encontró valor numérico en ti_1_7.csv");
     }
 
     res.json({
@@ -125,7 +154,7 @@ app.get("/api/euribor", async (req,res)=>{
       euribor:{
         valor,
         fecha,
-        descripcion:"Euríbor último dato disponible"
+        descripcion:"Euríbor a 12 meses. Último dato disponible"
       },
       tipo_medio_hipotecario:{
         valor:null,
@@ -187,12 +216,15 @@ app.post("/api/ctr", (req,res)=>{
     });
 
   }catch(error){
-    res.status(500).json({ ok:false, error:error.message });
+    res.status(500).json({
+      ok:false,
+      error:error.message
+    });
   }
 });
 
 /* =========================================================
-   ENTORNO
+   ENTORNO REAL
 ========================================================= */
 
 app.get("/api/entorno", async (req,res)=>{
@@ -275,9 +307,21 @@ app.get("/api/entorno", async (req,res)=>{
       resumen[key] = (resumen[key] || 0) + 1;
     }
 
-    const aqi = ultimoValido(h.european_aqi);
-    const puntuacionAire = aqi === null ? 65 : aqi <= 20 ? 100 : aqi <= 50 ? 75 : aqi <= 75 ? 50 : 25;
-    const puntuacionServicios = servicios.length >= 12 ? 100 : servicios.length >= 6 ? 70 : servicios.length >= 2 ? 45 : 25;
+    const aqi = ultimoValido(h.european_aqi, h.time);
+
+    const puntuacionAire =
+      aqi === null ? 65 :
+      aqi <= 20 ? 100 :
+      aqi <= 50 ? 75 :
+      aqi <= 75 ? 50 :
+      25;
+
+    const puntuacionServicios =
+      servicios.length >= 12 ? 100 :
+      servicios.length >= 6 ? 70 :
+      servicios.length >= 2 ? 45 :
+      25;
+
     const puntuacion_global = Math.round((puntuacionAire * 0.6) + (puntuacionServicios * 0.4));
 
     res.json({
@@ -295,14 +339,14 @@ app.get("/api/entorno", async (req,res)=>{
       aire:{
         fuente:"Open-Meteo Air Quality",
         fecha:ultimaFecha(h.time,h.european_aqi),
-        pm2_5:ultimoValido(h.pm2_5),
-        pm10:ultimoValido(h.pm10),
-        no2:ultimoValido(h.nitrogen_dioxide),
-        ozono:ultimoValido(h.ozone),
-        co:ultimoValido(h.carbon_monoxide),
-        so2:ultimoValido(h.sulphur_dioxide),
+        pm2_5:ultimoValido(h.pm2_5,h.time),
+        pm10:ultimoValido(h.pm10,h.time),
+        no2:ultimoValido(h.nitrogen_dioxide,h.time),
+        ozono:ultimoValido(h.ozone,h.time),
+        co:ultimoValido(h.carbon_monoxide,h.time),
+        so2:ultimoValido(h.sulphur_dioxide,h.time),
         aqi_europeo:aqi,
-        uv_index:ultimoValido(h.uv_index)
+        uv_index:ultimoValido(h.uv_index,h.time)
       },
       meteo:{
         fuente:"Open-Meteo",
@@ -314,14 +358,17 @@ app.get("/api/entorno", async (req,res)=>{
       radiacion:{
         fuente:"Open-Meteo Air Quality",
         fecha:ultimaFecha(h.time,h.uv_index),
-        uv_index:ultimoValido(h.uv_index)
+        uv_index:ultimoValido(h.uv_index,h.time)
       },
       servicios_resumen:resumen,
       servicios_con_direccion:servicios,
       fuente_servicios:"Geoapify Places",
       lectura_entorno:{
         puntuacion_global,
-        estado_global:puntuacion_global >= 70 ? "Favorable" : puntuacion_global >= 45 ? "Intermedio" : "Mejorable"
+        estado_global:
+          puntuacion_global >= 70 ? "Favorable" :
+          puntuacion_global >= 45 ? "Intermedio" :
+          "Mejorable"
       },
       advertencias:GEOAPIFY_KEY ? [] : ["Falta GEOAPIFY_KEY: no se han consultado servicios cercanos."]
     });
@@ -375,6 +422,7 @@ app.get("/api/renta", async (req,res)=>{
       );
 
       const p = r.data?.features?.[0]?.properties || {};
+
       geo.direccion_localizada = geo.direccion_localizada || p.formatted || null;
       geo.municipio = geo.municipio || p.city || p.town || p.village || null;
       geo.provincia = geo.provincia || p.county || p.state || null;
@@ -395,6 +443,7 @@ app.get("/api/renta", async (req,res)=>{
     };
 
     let renta = 23000;
+
     for(const key of Object.keys(mapa)){
       if(provinciaTxt.includes(key)) renta = mapa[key];
     }
@@ -426,7 +475,9 @@ app.get("/api/renta", async (req,res)=>{
   }
 });
 
-/* ========================================================= */
+/* =========================================================
+   ARRANQUE
+========================================================= */
 
 app.listen(PORT, ()=>{
   console.log(`Servidor InmoRecursos 6.1 activo en puerto ${PORT}`);
