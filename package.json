@@ -1,7 +1,7 @@
 {
   "name": "inmorecursos-backend",
-  "version": "10.0.0",
-  "description": "Backend producto final InmoRecursos",
+  "version": "6.1.0",
+  "description": "Backend profesional InmoRecursos 6.1",
   "main": "server.js",
   "type": "module",
   "scripts": {
