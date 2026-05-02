@@ -17,7 +17,22 @@ const GEOAPIFY_KEY = process.env.GEOAPIFY_KEY;
 ========================================================= */
 
 function okNum(v){
-  return Number.isFinite(Number(v));
+  if(v === null || v === undefined) return false;
+  const limpio = String(v)
+    .trim()
+    .replace("%","")
+    .replace(",", ".")
+    .replace(/[^\d.-]/g, "");
+  return Number.isFinite(Number(limpio));
+}
+
+function toNum(v){
+  const limpio = String(v)
+    .trim()
+    .replace("%","")
+    .replace(",", ".")
+    .replace(/[^\d.-]/g, "");
+  return Number(limpio);
 }
 
 function indiceActual(times, values){
@@ -49,11 +64,11 @@ function ultimoValido(arr, times=null){
 
   if(times){
     const i = indiceActual(times, arr);
-    if(i >= 0) return Number(arr[i]);
+    if(i >= 0) return toNum(arr[i]);
   }
 
   for(let i=arr.length-1;i>=0;i--){
-    if(okNum(arr[i])) return Number(arr[i]);
+    if(okNum(arr[i])) return toNum(arr[i]);
   }
 
   return null;
@@ -112,62 +127,146 @@ app.get("/api/health", (req,res)=>{
 });
 
 /* =========================================================
-   EURÍBOR REAL - BANCO DE ESPAÑA
+   EURÍBOR REAL
 ========================================================= */
 
-app.get("/api/euribor", async (req,res)=>{
-  try{
-    const url = "https://www.bde.es/webbe/es/estadisticas/compartido/datos/csv/ti_1_7.csv";
+async function obtenerEuriborBancoEspana(){
+  const url = "https://www.bde.es/webbe/es/estadisticas/compartido/datos/csv/ti_1_7.csv";
 
-    const r = await axios.get(url, { timeout: 15000 });
-    const texto = String(r.data || "");
-    const lineas = texto.split(/\r?\n/).filter(Boolean);
+  const r = await axios.get(url, {
+    timeout: 20000,
+    responseType:"text",
+    transformResponse:[data => data]
+  });
 
-    let valor = null;
-    let fecha = null;
+  const texto = String(r.data || "");
+  const lineas = texto.split(/\r?\n/).filter(Boolean);
 
-    for(let i=lineas.length-1;i>=0;i--){
-      const cols = lineas[i].split(";").map(x=>x.trim().replace(/^"|"$/g,""));
+  let candidatos = [];
 
-      const posibleFecha = cols[0];
+  for(const linea of lineas){
+    const limpia = linea.replace(/"/g,"").trim();
+    if(!limpia) continue;
 
-      for(let c=cols.length-1;c>=1;c--){
-        const posibleValor = cols[c].replace(",", ".");
-        if(Number.isFinite(Number(posibleValor))){
-          valor = Number(posibleValor);
-          fecha = posibleFecha;
-          break;
-        }
-      }
+    const partes = limpia.split(/;|,/).map(x=>x.trim()).filter(Boolean);
 
-      if(valor !== null) break;
+    const fecha = partes.find(p =>
+      /^\d{4}[-/]\d{1,2}[-/]\d{1,2}$/.test(p) ||
+      /^\d{1,2}[-/]\d{1,2}[-/]\d{4}$/.test(p) ||
+      /^\d{4}[A-Z]\d{2}$/.test(p)
+    );
+
+    if(!fecha) continue;
+
+    const nums = partes
+      .filter(p => okNum(p))
+      .map(p => toNum(p))
+      .filter(v => v > -10 && v < 20);
+
+    if(nums.length){
+      candidatos.push({
+        fecha,
+        valor:nums[nums.length-1]
+      });
     }
+  }
 
-    if(valor === null){
-      throw new Error("No se encontró valor numérico en ti_1_7.csv");
+  if(!candidatos.length){
+    throw new Error("Banco de España no devolvió filas numéricas interpretables.");
+  }
+
+  const ultimo = candidatos[candidatos.length-1];
+
+  return {
+    valor:ultimo.valor,
+    fecha:ultimo.fecha,
+    fuente:"Banco de España",
+    descripcion:"Euríbor a 12 meses. Último dato disponible"
+  };
+}
+
+async function obtenerEuriborECB(){
+  const url =
+    "https://data-api.ecb.europa.eu/service/data/FM/M.U2.EUR.RT.MM.EURIBOR1YD_.HSTA?lastNObservations=1&format=jsondata";
+
+  const r = await axios.get(url, {
+    timeout: 20000,
+    headers:{ Accept:"application/json" }
+  });
+
+  const data = r.data;
+
+  const seriesObj = data?.dataSets?.[0]?.series;
+  const structure = data?.structure;
+
+  if(!seriesObj || !structure){
+    throw new Error("ECB no devolvió estructura de datos interpretable.");
+  }
+
+  const firstSeriesKey = Object.keys(seriesObj)[0];
+  const observations = seriesObj[firstSeriesKey]?.observations;
+
+  if(!observations){
+    throw new Error("ECB no devolvió observaciones.");
+  }
+
+  const obsKey = Object.keys(observations)[0];
+  const valor = observations[obsKey]?.[0];
+
+  const timeValues =
+    structure?.dimensions?.observation?.find(d=>d.id==="TIME_PERIOD")?.values || [];
+
+  const fecha = timeValues[Number(obsKey)]?.id || null;
+
+  if(!okNum(valor)){
+    throw new Error("ECB no devolvió valor numérico.");
+  }
+
+  return {
+    valor:toNum(valor),
+    fecha,
+    fuente:"Banco Central Europeo / ECB Data Portal",
+    descripcion:"Euríbor 1 año. Última observación disponible"
+  };
+}
+
+app.get("/api/euribor", async (req,res)=>{
+  let errores = [];
+
+  try{
+    let euribor;
+
+    try{
+      euribor = await obtenerEuriborBancoEspana();
+    }catch(e){
+      errores.push("Banco de España: " + e.message);
+      euribor = await obtenerEuriborECB();
     }
 
     res.json({
       ok:true,
       consulta_realizada:new Date().toISOString(),
-      fuente:"Banco de España",
+      fuente:euribor.fuente,
       euribor:{
-        valor,
-        fecha,
-        descripcion:"Euríbor a 12 meses. Último dato disponible"
+        valor:euribor.valor,
+        fecha:euribor.fecha,
+        descripcion:euribor.descripcion
       },
       tipo_medio_hipotecario:{
         valor:null,
         fecha:null,
         descripcion:"No disponible en este endpoint"
-      }
+      },
+      advertencias:errores
     });
 
   }catch(error){
+    errores.push(error.message);
+
     res.status(500).json({
       ok:false,
       error:"No se pudo obtener el Euríbor oficial",
-      detalle:error.message
+      detalle:errores.join(" | ")
     });
   }
 });
