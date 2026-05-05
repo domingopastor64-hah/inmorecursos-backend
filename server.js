@@ -2,582 +2,772 @@ import express from "express";
 import cors from "cors";
 import axios from "axios";
 import dotenv from "dotenv";
+import { parse } from "csv-parse/sync";
 
 dotenv.config();
 
 const app = express();
-app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: "1mb" }));
 
-const PORT = process.env.PORT || 3000;
-const GEOAPIFY_KEY = process.env.GEOAPIFY_KEY;
+const PORT = process.env.PORT || 10000;
+const ALLOWED_ORIGINS = process.env.ALLOWED_ORIGINS || "*";
 
-/* =========================================================
-   UTILIDADES
-========================================================= */
+app.use(cors({
+  origin: ALLOWED_ORIGINS === "*"
+    ? true
+    : ALLOWED_ORIGINS.split(",").map(x => x.trim()),
+  methods: ["GET", "POST", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"]
+}));
 
-function okNum(v){
-  if(v === null || v === undefined) return false;
-  const limpio = String(v)
-    .trim()
-    .replace("%","")
-    .replace(",", ".")
-    .replace(/[^\d.-]/g, "");
-  return Number.isFinite(Number(limpio));
-}
+const GEOAPIFY_KEY = process.env.GEOAPIFY_KEY || "";
+const ORS_KEY = process.env.ORS_KEY || "";
+const AEMET_KEY = process.env.AEMET_KEY || "";
 
-function toNum(v){
-  const limpio = String(v)
-    .trim()
-    .replace("%","")
-    .replace(",", ".")
-    .replace(/[^\d.-]/g, "");
-  return Number(limpio);
-}
+const BDE_API_BASE = process.env.BDE_API_BASE || "https://app.bde.es/asb_www/es";
+const BDE_EURIBOR_SERIES = process.env.BDE_EURIBOR_SERIES || "";
 
-function indiceActual(times, values){
-  if(!Array.isArray(times) || !Array.isArray(values)) return -1;
+const INE_RENTA_TABLE = process.env.INE_RENTA_TABLE || "30896";
+const MARKET_PRICE_API_URL = process.env.MARKET_PRICE_API_URL || "";
+const CATASTRO_PROXY_URL = process.env.CATASTRO_PROXY_URL || "";
 
-  const ahora = new Date();
-  let mejor = -1;
-  let menorDiferencia = Infinity;
+const cache = new Map();
 
-  for(let i=0;i<times.length;i++){
-    if(!okNum(values[i])) continue;
-
-    const fecha = new Date(times[i]);
-    if(isNaN(fecha.getTime())) continue;
-
-    const diferencia = Math.abs(ahora - fecha);
-
-    if(diferencia < menorDiferencia){
-      menorDiferencia = diferencia;
-      mejor = i;
-    }
-  }
-
-  return mejor;
-}
-
-function ultimoValido(arr, times=null){
-  if(!Array.isArray(arr)) return null;
-
-  if(times){
-    const i = indiceActual(times, arr);
-    if(i >= 0) return toNum(arr[i]);
-  }
-
-  for(let i=arr.length-1;i>=0;i--){
-    if(okNum(arr[i])) return toNum(arr[i]);
-  }
-
-  return null;
-}
-
-function ultimaFecha(times, values){
-  const i = indiceActual(times, values);
-  return i >= 0 ? times[i] : null;
-}
-
-async function geocodificarDireccion(direccion){
-  if(!GEOAPIFY_KEY) throw new Error("Falta GEOAPIFY_KEY en Render");
-
-  const url = `https://api.geoapify.com/v1/geocode/search?text=${encodeURIComponent(direccion)}&limit=1&apiKey=${GEOAPIFY_KEY}`;
-  const r = await axios.get(url, { timeout: 15000 });
-  const f = r.data?.features?.[0];
-
-  if(!f) throw new Error("No se pudo geocodificar la dirección");
-
+function ok(data = {}) {
   return {
-    lat: f.properties.lat,
-    lon: f.properties.lon,
-    direccion_localizada: f.properties.formatted,
-    municipio: f.properties.city || f.properties.town || f.properties.village || null,
-    provincia: f.properties.county || f.properties.state || null,
-    comunidad: f.properties.state || null,
-    cp: f.properties.postcode || null
+    ok: true,
+    consulta_realizada: new Date().toISOString(),
+    ...data
   };
 }
 
-/* =========================================================
-   HEALTH
-========================================================= */
+function fail(message, extra = {}) {
+  return {
+    ok: false,
+    consulta_realizada: new Date().toISOString(),
+    error: message,
+    ...extra
+  };
+}
 
-app.get("/", (req,res)=>{
-  res.json({
-    ok:true,
-    mensaje:"Backend InmoRecursos 6.1 activo",
-    rutas:[
-      "/api/health",
-      "/api/euribor",
-      "/api/entorno?lat=40.03&lon=-6.08",
-      "/api/renta?lat=40.03&lon=-6.08",
-      "/api/ctr"
-    ]
+function cleanText(v = "") {
+  return String(v)
+    .normalize("NFD")
+    .replace(/\p{Diacritic}/gu, "")
+    .toLowerCase()
+    .trim();
+}
+
+function toNumber(v) {
+  if (v === null || v === undefined) return null;
+  if (typeof v === "number") return Number.isFinite(v) ? v : null;
+  const n = Number(String(v).replace(",", ".").replace(/[^\d.-]/g, ""));
+  return Number.isFinite(n) ? n : null;
+}
+
+async function cached(key, ttlMs, fn) {
+  const now = Date.now();
+  const item = cache.get(key);
+  if (item && now - item.t < ttlMs) return item.v;
+  const v = await fn();
+  cache.set(key, { t: now, v });
+  return v;
+}
+
+async function getJson(url, options = {}, timeout = 18000) {
+  const res = await axios.get(url, {
+    timeout,
+    responseType: "json",
+    validateStatus: () => true,
+    ...options
   });
-});
 
-app.get("/api/health", (req,res)=>{
-  res.json({
-    ok:true,
-    version:"6.1",
-    geoapify:Boolean(GEOAPIFY_KEY),
-    fecha:new Date().toISOString()
-  });
-});
+  if (res.status < 200 || res.status >= 300) {
+    throw new Error(`HTTP ${res.status}`);
+  }
 
-/* =========================================================
-   EURÍBOR REAL
-========================================================= */
+  return res.data;
+}
 
-async function obtenerEuriborBancoEspana(){
-  const url = "https://www.bde.es/webbe/es/estadisticas/compartido/datos/csv/ti_1_7.csv";
-
-  const r = await axios.get(url, {
-    timeout: 20000,
-    responseType:"text",
-    transformResponse:[data => data]
+async function getText(url, options = {}, timeout = 18000) {
+  const res = await axios.get(url, {
+    timeout,
+    responseType: "text",
+    validateStatus: () => true,
+    ...options
   });
 
-  const texto = String(r.data || "");
-  const lineas = texto.split(/\r?\n/).filter(Boolean);
+  if (res.status < 200 || res.status >= 300) {
+    throw new Error(`HTTP ${res.status}`);
+  }
 
-  let candidatos = [];
+  return res.data;
+}
 
-  for(const linea of lineas){
-    const limpia = linea.replace(/"/g,"").trim();
-    if(!limpia) continue;
+function requireQuery(res, value, name) {
+  if (!value) {
+    res.status(400).json(fail(`Falta el parámetro obligatorio: ${name}`));
+    return false;
+  }
+  return true;
+}
 
-    const partes = limpia.split(/;|,/).map(x=>x.trim()).filter(Boolean);
+async function geocodeAddress(address) {
+  if (!address) throw new Error("Dirección no indicada");
 
-    const fecha = partes.find(p =>
-      /^\d{4}[-/]\d{1,2}[-/]\d{1,2}$/.test(p) ||
-      /^\d{1,2}[-/]\d{1,2}[-/]\d{4}$/.test(p) ||
-      /^\d{4}[A-Z]\d{2}$/.test(p)
+  if (GEOAPIFY_KEY) {
+    const url = "https://api.geoapify.com/v1/geocode/search";
+    const data = await getJson(url, {
+      params: {
+        text: address,
+        lang: "es",
+        limit: 1,
+        apiKey: GEOAPIFY_KEY
+      }
+    });
+
+    const f = data?.features?.[0];
+    if (!f) throw new Error("No se pudo geocodificar la dirección");
+
+    return {
+      lat: f.geometry.coordinates[1],
+      lon: f.geometry.coordinates[0],
+      label: f.properties.formatted || address,
+      municipio: f.properties.city || f.properties.town || f.properties.village || f.properties.county || "",
+      provincia: f.properties.county || f.properties.state || "",
+      comunidad: f.properties.state || "",
+      source: "Geoapify"
+    };
+  }
+
+  const url = "https://nominatim.openstreetmap.org/search";
+  const data = await getJson(url, {
+    params: {
+      q: address,
+      format: "json",
+      limit: 1,
+      addressdetails: 1
+    },
+    headers: {
+      "User-Agent": "InmoRecursos/1.0 contacto@inmorecursos.com"
+    }
+  });
+
+  const f = data?.[0];
+  if (!f) throw new Error("No se pudo geocodificar la dirección");
+
+  return {
+    lat: Number(f.lat),
+    lon: Number(f.lon),
+    label: f.display_name || address,
+    municipio: f.address?.city || f.address?.town || f.address?.village || "",
+    provincia: f.address?.county || f.address?.state || "",
+    comunidad: f.address?.state || "",
+    source: "OpenStreetMap Nominatim"
+  };
+}
+
+async function getGeoapifyPlaces(lat, lon, radius = 500) {
+  if (!GEOAPIFY_KEY) {
+    return {
+      ok: false,
+      resumen: {},
+      items: [],
+      advertencia: "Geoapify no configurado"
+    };
+  }
+
+  const categories = [
+    "commercial.supermarket",
+    "healthcare.pharmacy",
+    "healthcare.hospital",
+    "healthcare.clinic_or_praxis",
+    "education.school",
+    "education.university",
+    "public_transport",
+    "leisure.park",
+    "catering.restaurant",
+    "service.financial.bank",
+    "entertainment.culture.library",
+    "parking"
+  ].join(",");
+
+  const data = await getJson("https://api.geoapify.com/v2/places", {
+    params: {
+      categories,
+      filter: `circle:${lon},${lat},${radius}`,
+      bias: `proximity:${lon},${lat}`,
+      limit: 60,
+      lang: "es",
+      apiKey: GEOAPIFY_KEY
+    }
+  });
+
+  const items = (data.features || []).map(f => ({
+    nombre: f.properties.name || "Servicio sin nombre",
+    tipo: f.properties.categories?.[0] || "",
+    direccion: f.properties.formatted || "",
+    distancia_m: f.properties.distance ?? null,
+    lat: f.geometry.coordinates[1],
+    lon: f.geometry.coordinates[0]
+  }));
+
+  const resumen = {};
+  for (const item of items) {
+    const k = item.tipo.split(".")[0] || "otros";
+    resumen[k] = (resumen[k] || 0) + 1;
+  }
+
+  return {
+    ok: true,
+    resumen,
+    items
+  };
+}
+
+async function getOpenMeteoAir(lat, lon) {
+  const vars = [
+    "pm10",
+    "pm2_5",
+    "carbon_monoxide",
+    "nitrogen_dioxide",
+    "sulphur_dioxide",
+    "ozone",
+    "european_aqi"
+  ].join(",");
+
+  const data = await getJson("https://air-quality-api.open-meteo.com/v1/air-quality", {
+    params: {
+      latitude: lat,
+      longitude: lon,
+      hourly: vars,
+      timezone: "Europe/Madrid"
+    }
+  });
+
+  const h = data.hourly || {};
+  const idx = 0;
+
+  return {
+    pm10: h.pm10?.[idx] ?? null,
+    pm2_5: h.pm2_5?.[idx] ?? null,
+    co: h.carbon_monoxide?.[idx] ?? null,
+    no2: h.nitrogen_dioxide?.[idx] ?? null,
+    so2: h.sulphur_dioxide?.[idx] ?? null,
+    ozono: h.ozone?.[idx] ?? null,
+    aqi_europeo: h.european_aqi?.[idx] ?? null,
+    fuente: "Open-Meteo Air Quality"
+  };
+}
+
+async function getOpenMeteoWeather(lat, lon) {
+  const data = await getJson("https://api.open-meteo.com/v1/forecast", {
+    params: {
+      latitude: lat,
+      longitude: lon,
+      current: "temperature_2m,relative_humidity_2m,wind_speed_10m,uv_index",
+      timezone: "Europe/Madrid"
+    }
+  });
+
+  const c = data.current || {};
+
+  return {
+    temperatura: c.temperature_2m ?? null,
+    humedad_relativa: c.relative_humidity_2m ?? null,
+    viento: c.wind_speed_10m ?? null,
+    uv_index: c.uv_index ?? null,
+    fuente: "Open-Meteo Forecast"
+  };
+}
+
+async function getAemetUvFallback() {
+  if (!AEMET_KEY) return null;
+
+  try {
+    const first = await getJson(
+      "https://opendata.aemet.es/opendata/api/prediccion/especifica/uvi/0/",
+      { headers: { api_key: AEMET_KEY } },
+      12000
     );
 
-    if(!fecha) continue;
+    if (!first?.datos) return null;
 
-    const nums = partes
-      .filter(p => okNum(p))
-      .map(p => toNum(p))
-      .filter(v => v > -10 && v < 20);
+    const data = await getJson(first.datos, {}, 12000);
 
-    if(nums.length){
-      candidatos.push({
-        fecha,
-        valor:nums[nums.length-1]
-      });
-    }
+    return {
+      datos: data,
+      fuente: "AEMET OpenData UVI"
+    };
+  } catch {
+    return null;
   }
-
-  if(!candidatos.length){
-    throw new Error("Banco de España no devolvió filas numéricas interpretables.");
-  }
-
-  const ultimo = candidatos[candidatos.length-1];
-
-  return {
-    valor:ultimo.valor,
-    fecha:ultimo.fecha,
-    fuente:"Banco de España",
-    descripcion:"Euríbor a 12 meses. Último dato disponible"
-  };
 }
 
-async function obtenerEuriborECB(){
-  const url =
-    "https://data-api.ecb.europa.eu/service/data/FM/M.U2.EUR.RT.MM.EURIBOR1YD_.HSTA?lastNObservations=1&format=jsondata";
+function scoreAir(air = {}) {
+  let score = 100;
 
-  const r = await axios.get(url, {
-    timeout: 20000,
-    headers:{ Accept:"application/json" }
-  });
+  const pm25 = toNumber(air.pm2_5);
+  const pm10 = toNumber(air.pm10);
+  const no2 = toNumber(air.no2);
+  const ozone = toNumber(air.ozono);
+  const aqi = toNumber(air.aqi_europeo);
 
-  const data = r.data;
+  if (pm25 !== null) score -= pm25 > 25 ? 28 : pm25 > 10 ? 12 : 0;
+  if (pm10 !== null) score -= pm10 > 40 ? 20 : pm10 > 20 ? 8 : 0;
+  if (no2 !== null) score -= no2 > 40 ? 20 : no2 > 20 ? 8 : 0;
+  if (ozone !== null) score -= ozone > 120 ? 14 : ozone > 100 ? 6 : 0;
+  if (aqi !== null) score -= aqi > 50 ? 20 : aqi > 20 ? 8 : 0;
 
-  const seriesObj = data?.dataSets?.[0]?.series;
-  const structure = data?.structure;
-
-  if(!seriesObj || !structure){
-    throw new Error("ECB no devolvió estructura de datos interpretable.");
-  }
-
-  const firstSeriesKey = Object.keys(seriesObj)[0];
-  const observations = seriesObj[firstSeriesKey]?.observations;
-
-  if(!observations){
-    throw new Error("ECB no devolvió observaciones.");
-  }
-
-  const obsKey = Object.keys(observations)[0];
-  const valor = observations[obsKey]?.[0];
-
-  const timeValues =
-    structure?.dimensions?.observation?.find(d=>d.id==="TIME_PERIOD")?.values || [];
-
-  const fecha = timeValues[Number(obsKey)]?.id || null;
-
-  if(!okNum(valor)){
-    throw new Error("ECB no devolvió valor numérico.");
-  }
-
-  return {
-    valor:toNum(valor),
-    fecha,
-    fuente:"Banco Central Europeo / ECB Data Portal",
-    descripcion:"Euríbor 1 año. Última observación disponible"
-  };
+  return Math.max(0, Math.min(100, Math.round(score)));
 }
 
-app.get("/api/euribor", async (req,res)=>{
-  let errores = [];
+function scoreServices(resumen = {}) {
+  const total = Object.values(resumen).reduce((a, b) => a + Number(b || 0), 0);
+  if (total >= 15) return 90;
+  if (total >= 10) return 75;
+  if (total >= 5) return 55;
+  if (total >= 2) return 35;
+  return 20;
+}
 
-  try{
-    let euribor;
+app.get("/", (_, res) => {
+  res.json(ok({
+    service: "InmoRecursos · Backend puntos de control",
+    endpoints: [
+      "/health",
+      "/api/geocode",
+      "/api/entorno",
+      "/api/euribor",
+      "/api/renta",
+      "/api/compra/mercado",
+      "/api/catastro",
+      "/api/ruta"
+    ]
+  }));
+});
 
-    try{
-      euribor = await obtenerEuriborBancoEspana();
-    }catch(e){
-      errores.push("Banco de España: " + e.message);
-      euribor = await obtenerEuriborECB();
+app.get("/health", (_, res) => {
+  res.json(ok({
+    status: "running",
+    configured: {
+      geoapify: Boolean(GEOAPIFY_KEY),
+      openRouteService: Boolean(ORS_KEY),
+      aemet: Boolean(AEMET_KEY),
+      bancoEspanaSerieEuribor: Boolean(BDE_EURIBOR_SERIES),
+      marketPriceApi: Boolean(MARKET_PRICE_API_URL),
+      catastroProxy: Boolean(CATASTRO_PROXY_URL)
     }
+  }));
+});
 
-    res.json({
-      ok:true,
-      consulta_realizada:new Date().toISOString(),
-      fuente:euribor.fuente,
-      euribor:{
-        valor:euribor.valor,
-        fecha:euribor.fecha,
-        descripcion:euribor.descripcion
-      },
-      tipo_medio_hipotecario:{
-        valor:null,
-        fecha:null,
-        descripcion:"No disponible en este endpoint"
-      },
-      advertencias:errores
-    });
+app.get("/api/geocode", async (req, res) => {
+  const direccion = req.query.direccion || req.query.address;
+  if (!requireQuery(res, direccion, "direccion")) return;
 
-  }catch(error){
-    errores.push(error.message);
+  try {
+    const geo = await cached(
+      `geo:${direccion}`,
+      1000 * 60 * 60 * 24,
+      () => geocodeAddress(direccion)
+    );
 
-    res.status(500).json({
-      ok:false,
-      error:"No se pudo obtener el Euríbor oficial",
-      detalle:errores.join(" | ")
-    });
+    res.json(ok({ geocoding: geo }));
+  } catch (err) {
+    res.status(502).json(fail("No se pudo geocodificar la dirección", {
+      detalle: err.message
+    }));
   }
 });
 
-/* =========================================================
-   CTR
-========================================================= */
+app.get("/api/entorno", async (req, res) => {
+  const direccion = req.query.direccion || req.query.address;
+  const radio = Number(req.query.radio || 500);
 
-app.post("/api/ctr", (req,res)=>{
-  try{
-    const {
-      cuota=0,
-      anos=30,
-      ibi=0,
-      comunidad=0,
-      seguro=0,
-      suministros=0,
-      mantenimiento=0,
-      transporte=0
-    } = req.body || {};
+  if (!requireQuery(res, direccion, "direccion")) return;
 
-    const componentes = {
-      cuota_hipoteca:Number(cuota)||0,
-      ibi:Number(ibi)||0,
-      comunidad:Number(comunidad)||0,
-      seguro:Number(seguro)||0,
-      suministros:Number(suministros)||0,
-      mantenimiento:Number(mantenimiento)||0,
-      transporte:Number(transporte)||0
-    };
+  try {
+    const result = await cached(
+      `entorno:${direccion}:${radio}`,
+      1000 * 60 * 60,
+      async () => {
+        const geo = await geocodeAddress(direccion);
 
-    const ctr_mensual = Object.values(componentes).reduce((a,b)=>a+b,0);
-    const ctr_anual = ctr_mensual * 12;
-    const ctr_total_periodo = ctr_anual * (Number(anos)||0);
+        const [airResult, weatherResult, placesResult, aemetUv] = await Promise.allSettled([
+          getOpenMeteoAir(geo.lat, geo.lon),
+          getOpenMeteoWeather(geo.lat, geo.lon),
+          getGeoapifyPlaces(geo.lat, geo.lon, radio),
+          getAemetUvFallback()
+        ]);
 
-    res.json({
-      ok:true,
-      consulta_realizada:new Date().toISOString(),
-      ctr:{
-        ctr_mensual,
-        ctr_anual,
-        ctr_total_periodo,
-        componentes,
-        advertencias:[]
+        const aire = airResult.status === "fulfilled" ? airResult.value : {};
+        const meteo = weatherResult.status === "fulfilled" ? weatherResult.value : {};
+        const places = placesResult.status === "fulfilled"
+          ? placesResult.value
+          : { ok: false, resumen: {}, items: [], advertencia: "Servicios no disponibles" };
+
+        const airScore = scoreAir(aire);
+        const serviceScore = scoreServices(places.resumen);
+        const puntuacion = Math.round((airScore * 0.55) + (serviceScore * 0.45));
+
+        const advertencias = [];
+        if (airResult.status !== "fulfilled") advertencias.push("Calidad del aire no disponible.");
+        if (weatherResult.status !== "fulfilled") advertencias.push("Meteorología no disponible.");
+        if (placesResult.status !== "fulfilled") advertencias.push("Servicios cercanos no disponibles.");
+        if (!GEOAPIFY_KEY) advertencias.push("Geoapify no configurado; no se pueden consultar servicios cercanos.");
+        if (!AEMET_KEY) advertencias.push("AEMET no configurado; se usa Open-Meteo para datos ambientales disponibles.");
+
+        return {
+          direccion_solicitada: direccion,
+          direccion_localizada: geo.label,
+          lat: geo.lat,
+          lon: geo.lon,
+          municipio: geo.municipio,
+          provincia: geo.provincia,
+          comunidad: geo.comunidad,
+          radio_m: radio,
+          geocodificacion_fuente: geo.source,
+          aire,
+          meteo: {
+            ...meteo,
+            uv_aemet: aemetUv.status === "fulfilled" ? aemetUv.value : null
+          },
+          servicios_resumen: places.resumen,
+          servicios_con_direccion: places.items,
+          lectura_entorno: {
+            puntuacion_aire: airScore,
+            puntuacion_servicios: serviceScore,
+            puntuacion_global: puntuacion,
+            lectura: puntuacion >= 70 ? "Entorno favorable" : puntuacion >= 45 ? "Entorno funcional" : "Entorno condicionante"
+          },
+          advertencias
+        };
       }
-    });
+    );
 
-  }catch(error){
-    res.status(500).json({
-      ok:false,
-      error:error.message
-    });
+    res.json(ok(result));
+  } catch (err) {
+    res.status(502).json(fail("No se pudo obtener el entorno", {
+      detalle: err.message
+    }));
   }
 });
 
-/* =========================================================
-   ENTORNO REAL
-========================================================= */
-
-app.get("/api/entorno", async (req,res)=>{
-  try{
-    let { lat, lon, direccion, radio=500 } = req.query;
-
-    let geo = {
-      direccion_solicitada: direccion || null,
-      direccion_localizada: null,
-      municipio:null,
-      provincia:null,
-      comunidad:null,
-      cp:null
-    };
-
-    if((!lat || !lon) && direccion){
-      const g = await geocodificarDireccion(direccion);
-      lat = g.lat;
-      lon = g.lon;
-      geo = { ...geo, ...g };
+app.get("/api/euribor", async (_, res) => {
+  try {
+    if (!BDE_EURIBOR_SERIES) {
+      return res.json(ok({
+        financiero: {
+          euribor: null,
+          fuente: "Banco de España no configurado"
+        },
+        advertencias: [
+          "Falta BDE_EURIBOR_SERIES. Configure el código de serie oficial del Banco de España para devolver el último dato real."
+        ]
+      }));
     }
 
-    if(!lat || !lon){
-      return res.status(400).json({
-        ok:false,
-        error:"Debe indicar lat/lon o direccion"
-      });
-    }
+    const data = await cached(
+      `bde:euribor:${BDE_EURIBOR_SERIES}`,
+      1000 * 60 * 60 * 12,
+      async () => {
+        const url = `${BDE_API_BASE}/api/series/${encodeURIComponent(BDE_EURIBOR_SERIES)}/ultimo`;
+        return getJson(url, {}, 20000);
+      }
+    );
 
-    lat = Number(lat);
-    lon = Number(lon);
-    radio = Number(radio) || 500;
+    const raw = Array.isArray(data) ? data[0] : data;
+    const valor =
+      toNumber(raw?.valor) ??
+      toNumber(raw?.value) ??
+      toNumber(raw?.ultimoDato?.valor) ??
+      toNumber(raw?.observaciones?.[0]?.valor);
 
-    const airUrl =
-      `https://air-quality-api.open-meteo.com/v1/air-quality?latitude=${lat}&longitude=${lon}&hourly=pm10,pm2_5,nitrogen_dioxide,ozone,carbon_monoxide,sulphur_dioxide,european_aqi,uv_index&timezone=auto`;
+    const fecha =
+      raw?.fecha ??
+      raw?.date ??
+      raw?.ultimoDato?.fecha ??
+      raw?.observaciones?.[0]?.fecha ??
+      null;
 
-    const meteoUrl =
-      `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current=temperature_2m,relative_humidity_2m,wind_speed_10m&timezone=auto`;
+    res.json(ok({
+      financiero: {
+        euribor: {
+          valor,
+          fecha,
+          serie: BDE_EURIBOR_SERIES
+        },
+        fuente: "Banco de España"
+      },
+      bruto: data
+    }));
+  } catch (err) {
+    res.status(502).json(fail("No se pudo consultar Banco de España", {
+      detalle: err.message
+    }));
+  }
+});
 
-    const [airRes, meteoRes] = await Promise.all([
-      axios.get(airUrl, { timeout: 15000 }),
-      axios.get(meteoUrl, { timeout: 15000 })
-    ]);
+app.get("/api/renta", async (req, res) => {
+  const direccion = req.query.direccion || req.query.address;
+  if (!requireQuery(res, direccion, "direccion")) return;
 
-    const h = airRes.data?.hourly || {};
-    const current = meteoRes.data?.current || {};
+  try {
+    const data = await cached(
+      `renta:${direccion}:${INE_RENTA_TABLE}`,
+      1000 * 60 * 60 * 24,
+      async () => {
+        const geo = await geocodeAddress(direccion);
 
-    const servicios = [];
-    const categorias = [
-      "commercial.supermarket",
-      "commercial.health_and_beauty.pharmacy",
-      "education.school",
-      "catering.restaurant",
-      "leisure.park",
-      "public_transport",
-      "service.financial.bank"
-    ];
+        const url = `https://servicios.ine.es/wstempus/js/ES/DATOS_TABLA/${INE_RENTA_TABLE}`;
+        const tabla = await getJson(url, {
+          params: { nult: 1 }
+        }, 25000);
 
-    if(GEOAPIFY_KEY){
-      for(const cat of categorias){
-        try{
-          const url = `https://api.geoapify.com/v2/places?categories=${cat}&filter=circle:${lon},${lat},${radio}&limit=8&apiKey=${GEOAPIFY_KEY}`;
-          const r = await axios.get(url, { timeout: 12000 });
+        const muni = cleanText(geo.municipio);
+        const encontrados = [];
 
-          for(const f of r.data?.features || []){
-            servicios.push({
-              nombre:f.properties?.name || "Servicio",
-              tipo:cat,
-              direccion:f.properties?.formatted || null,
-              distancia_m:f.properties?.distance || null
+        for (const serie of Array.isArray(tabla) ? tabla : []) {
+          const nombre = cleanText([
+            serie.Nombre,
+            serie.Metadata?.map(m => m.Nombre).join(" "),
+            serie.MetaData?.map(m => m.Nombre).join(" ")
+          ].filter(Boolean).join(" "));
+
+          if (!muni || nombre.includes(muni)) {
+            const dato = serie.Data?.[0] || serie.Datos?.[0] || null;
+            encontrados.push({
+              nombre: serie.Nombre || "",
+              valor: toNumber(dato?.Valor),
+              fecha: dato?.Fecha || dato?.Anyo || null
             });
           }
-        }catch(e){}
+        }
+
+        return {
+          direccion_solicitada: direccion,
+          direccion_localizada: geo.label,
+          municipio: geo.municipio,
+          provincia: geo.provincia,
+          comunidad: geo.comunidad,
+          fuente: `INE WSTempus DATOS_TABLA ${INE_RENTA_TABLE}`,
+          resultados: encontrados.slice(0, 20),
+          advertencias: encontrados.length
+            ? []
+            : ["No se han encontrado series filtradas por municipio. El backend devuelve dato no disponible."]
+        };
       }
-    }
+    );
 
-    const resumen = {};
-    for(const s of servicios){
-      const key = String(s.tipo).split(".")[0];
-      resumen[key] = (resumen[key] || 0) + 1;
-    }
-
-    const aqi = ultimoValido(h.european_aqi, h.time);
-
-    const puntuacionAire =
-      aqi === null ? 65 :
-      aqi <= 20 ? 100 :
-      aqi <= 50 ? 75 :
-      aqi <= 75 ? 50 :
-      25;
-
-    const puntuacionServicios =
-      servicios.length >= 12 ? 100 :
-      servicios.length >= 6 ? 70 :
-      servicios.length >= 2 ? 45 :
-      25;
-
-    const puntuacion_global = Math.round((puntuacionAire * 0.6) + (puntuacionServicios * 0.4));
-
-    res.json({
-      ok:true,
-      consulta_realizada:new Date().toISOString(),
-      direccion_solicitada:geo.direccion_solicitada,
-      direccion_localizada:geo.direccion_localizada,
-      lat,
-      lon,
-      municipio:geo.municipio,
-      provincia:geo.provincia,
-      comunidad:geo.comunidad,
-      cp:geo.cp,
-      radio_m:radio,
-      aire:{
-        fuente:"Open-Meteo Air Quality",
-        fecha:ultimaFecha(h.time,h.european_aqi),
-        pm2_5:ultimoValido(h.pm2_5,h.time),
-        pm10:ultimoValido(h.pm10,h.time),
-        no2:ultimoValido(h.nitrogen_dioxide,h.time),
-        ozono:ultimoValido(h.ozone,h.time),
-        co:ultimoValido(h.carbon_monoxide,h.time),
-        so2:ultimoValido(h.sulphur_dioxide,h.time),
-        aqi_europeo:aqi,
-        uv_index:ultimoValido(h.uv_index,h.time)
-      },
-      meteo:{
-        fuente:"Open-Meteo",
-        fecha:current.time || null,
-        temperatura:current.temperature_2m ?? null,
-        humedad_relativa:current.relative_humidity_2m ?? null,
-        viento:current.wind_speed_10m ?? null
-      },
-      radiacion:{
-        fuente:"Open-Meteo Air Quality",
-        fecha:ultimaFecha(h.time,h.uv_index),
-        uv_index:ultimoValido(h.uv_index,h.time)
-      },
-      servicios_resumen:resumen,
-      servicios_con_direccion:servicios,
-      fuente_servicios:"Geoapify Places",
-      lectura_entorno:{
-        puntuacion_global,
-        estado_global:
-          puntuacion_global >= 70 ? "Favorable" :
-          puntuacion_global >= 45 ? "Intermedio" :
-          "Mejorable"
-      },
-      advertencias:GEOAPIFY_KEY ? [] : ["Falta GEOAPIFY_KEY: no se han consultado servicios cercanos."]
-    });
-
-  }catch(error){
-    res.status(500).json({
-      ok:false,
-      error:"No se pudo obtener entorno",
-      detalle:error.message
-    });
+    res.json(ok({ renta: data }));
+  } catch (err) {
+    res.status(502).json(fail("No se pudo consultar INE", {
+      detalle: err.message
+    }));
   }
 });
 
-/* =========================================================
-   RENTA
-========================================================= */
+app.get("/api/compra/mercado", async (req, res) => {
+  const direccion = req.query.direccion || "";
+  const superficie = toNumber(req.query.superficie);
+  const precio = toNumber(req.query.precio);
 
-app.get("/api/renta", async (req,res)=>{
-  try{
-    let { lat, lon, direccion } = req.query;
+  if (!requireQuery(res, direccion, "direccion")) return;
 
-    let geo = {
-      direccion_solicitada: direccion || null,
-      direccion_localizada:null,
-      municipio:null,
-      provincia:null,
-      comunidad:null
-    };
+  try {
+    const geo = await geocodeAddress(direccion);
 
-    if((!lat || !lon) && direccion){
-      const g = await geocodificarDireccion(direccion);
-      lat = g.lat;
-      lon = g.lon;
-      geo = { ...geo, ...g };
+    if (!MARKET_PRICE_API_URL) {
+      return res.json(ok({
+        mercado: {
+          direccion_solicitada: direccion,
+          direccion_localizada: geo.label,
+          municipio: geo.municipio,
+          provincia: geo.provincia,
+          precio_compra: precio,
+          superficie,
+          precio_m2_compra: precio && superficie ? precio / superficie : null,
+          precio_m2_referencia: null,
+          ventas_realizadas: null,
+          liquidez: null,
+          fuente: "Mercado no configurado"
+        },
+        advertencias: [
+          "No hay MARKET_PRICE_API_URL configurado. No se inventa precio de mercado, ventas ni precio/m² de referencia."
+        ]
+      }));
     }
 
-    if(!lat || !lon){
-      return res.status(400).json({
-        ok:false,
-        error:"Debe indicar lat/lon o direccion"
-      });
-    }
-
-    lat = Number(lat);
-    lon = Number(lon);
-
-    if(GEOAPIFY_KEY && (!geo.provincia || !geo.comunidad)){
-      const r = await axios.get(
-        `https://api.geoapify.com/v1/geocode/reverse?lat=${lat}&lon=${lon}&apiKey=${GEOAPIFY_KEY}`,
-        { timeout: 12000 }
-      );
-
-      const p = r.data?.features?.[0]?.properties || {};
-
-      geo.direccion_localizada = geo.direccion_localizada || p.formatted || null;
-      geo.municipio = geo.municipio || p.city || p.town || p.village || null;
-      geo.provincia = geo.provincia || p.county || p.state || null;
-      geo.comunidad = geo.comunidad || p.state || null;
-    }
-
-    const provinciaTxt = (geo.provincia || geo.comunidad || "").toLowerCase();
-
-    const mapa = {
-      madrid:32000,
-      barcelona:30000,
-      valencia:26000,
-      sevilla:24000,
-      caceres:19000,
-      cáceres:19000,
-      badajoz:20000,
-      extremadura:19500
-    };
-
-    let renta = 23000;
-
-    for(const key of Object.keys(mapa)){
-      if(provinciaTxt.includes(key)) renta = mapa[key];
-    }
-
-    res.json({
-      ok:true,
-      consulta_realizada:new Date().toISOString(),
-      direccion_solicitada:geo.direccion_solicitada,
-      direccion_localizada:geo.direccion_localizada,
-      municipio:geo.municipio,
-      provincia:geo.provincia,
-      comunidad:geo.comunidad,
-      fuente:"INE / modelo estimado estructurado",
-      renta:{
-        renta_media_persona:renta,
-        renta_media_hogar:Math.round(renta*2.25),
-        renta_mediana:Math.round(renta*0.92),
-        renta_unidad_consumo:Math.round(renta*1.08),
-        fecha:"Último dato disponible"
+    const external = await getJson(MARKET_PRICE_API_URL, {
+      params: {
+        direccion,
+        municipio: geo.municipio,
+        provincia: geo.provincia,
+        superficie,
+        precio
       }
-    });
+    }, 25000);
 
-  }catch(error){
-    res.status(500).json({
-      ok:false,
-      error:"No se pudo obtener renta",
-      detalle:error.message
-    });
+    const ref = toNumber(
+      external.precio_m2_referencia ??
+      external.precio_m2 ??
+      external.media_m2
+    );
+
+    const desviacion = precio && superficie && ref
+      ? ((precio / superficie) - ref) / ref * 100
+      : null;
+
+    res.json(ok({
+      mercado: {
+        direccion_solicitada: direccion,
+        direccion_localizada: geo.label,
+        municipio: geo.municipio,
+        provincia: geo.provincia,
+        precio_compra: precio,
+        superficie,
+        precio_m2_compra: precio && superficie ? precio / superficie : null,
+        precio_m2_referencia: ref,
+        desviacion_pct: desviacion,
+        ventas_realizadas: external.ventas_realizadas ?? external.operaciones ?? null,
+        liquidez: external.liquidez ?? null,
+        fuente: external.fuente || "Fuente externa configurada",
+        bruto: external
+      }
+    }));
+  } catch (err) {
+    res.status(502).json(fail("No se pudo consultar mercado", {
+      detalle: err.message
+    }));
   }
 });
 
-/* =========================================================
-   ARRANQUE
-========================================================= */
+app.get("/api/catastro", async (req, res) => {
+  const rc = req.query.rc || req.query.referenciaCatastral;
 
-app.listen(PORT, ()=>{
-  console.log(`Servidor InmoRecursos 6.1 activo en puerto ${PORT}`);
+  if (!requireQuery(res, rc, "rc")) return;
+
+  try {
+    if (!CATASTRO_PROXY_URL) {
+      return res.json(ok({
+        catastro: {
+          referencia_catastral: rc,
+          datos: null,
+          fuente: "Catastro no configurado"
+        },
+        advertencias: [
+          "No hay CATASTRO_PROXY_URL configurado. No se inventan superficie, uso ni antigüedad."
+        ]
+      }));
+    }
+
+    const data = await getJson(CATASTRO_PROXY_URL, {
+      params: { rc }
+    }, 25000);
+
+    res.json(ok({
+      catastro: {
+        referencia_catastral: rc,
+        fuente: data.fuente || "Proxy Catastro configurado",
+        datos: data
+      }
+    }));
+  } catch (err) {
+    res.status(502).json(fail("No se pudo consultar Catastro", {
+      detalle: err.message
+    }));
+  }
+});
+
+app.get("/api/ruta", async (req, res) => {
+  const origen = req.query.origen;
+  const destino = req.query.destino;
+  const profile = req.query.profile || "driving-car";
+
+  if (!requireQuery(res, origen, "origen")) return;
+  if (!requireQuery(res, destino, "destino")) return;
+
+  try {
+    if (!ORS_KEY) {
+      return res.json(ok({
+        ruta: null,
+        advertencias: [
+          "OpenRouteService no configurado. No se inventan tiempos ni distancias."
+        ]
+      }));
+    }
+
+    const [o, d] = await Promise.all([
+      geocodeAddress(origen),
+      geocodeAddress(destino)
+    ]);
+
+    const data = await getJson(
+      `https://api.openrouteservice.org/v2/directions/${profile}`,
+      {
+        params: {
+          api_key: ORS_KEY,
+          start: `${o.lon},${o.lat}`,
+          end: `${d.lon},${d.lat}`
+        }
+      },
+      25000
+    );
+
+    const summary = data.features?.[0]?.properties?.summary || {};
+
+    res.json(ok({
+      ruta: {
+        origen: o,
+        destino: d,
+        perfil: profile,
+        distancia_m: summary.distance ?? null,
+        duracion_s: summary.duration ?? null,
+        fuente: "OpenRouteService"
+      }
+    }));
+  } catch (err) {
+    res.status(502).json(fail("No se pudo calcular ruta", {
+      detalle: err.message
+    }));
+  }
+});
+
+app.post("/api/ctr", (req, res) => {
+  const b = req.body || {};
+
+  const componentes = {
+    cuota_hipoteca: toNumber(b.cuota) || 0,
+    ibi: toNumber(b.ibi) || 0,
+    comunidad: toNumber(b.comunidad) || 0,
+    seguro: toNumber(b.seguro) || 0,
+    suministros: toNumber(b.suministros) || 0,
+    mantenimiento: toNumber(b.mantenimiento) || 0,
+    transporte: toNumber(b.transporte) || 0
+  };
+
+  const mensual = Object.values(componentes).reduce((a, v) => a + v, 0);
+  const anos = toNumber(b.anos) || 30;
+
+  const advertencias = [];
+  if (!componentes.transporte) advertencias.push("Transporte no incluido.");
+  if (!componentes.mantenimiento) advertencias.push("Mantenimiento no incluido.");
+
+  res.json(ok({
+    ctr: {
+      componentes,
+      ctr_mensual: mensual,
+      ctr_anual: mensual * 12,
+      ctr_total_periodo: mensual * 12 * anos,
+      advertencias
+    }
+  }));
+});
+
+app.use((req, res) => {
+  res.status(404).json(fail("Endpoint no encontrado"));
+});
+
+app.listen(PORT, () => {
+  console.log(`InmoRecursos backend escuchando en puerto ${PORT}`);
 });
