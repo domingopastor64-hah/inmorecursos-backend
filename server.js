@@ -38,12 +38,15 @@ function limpiarRC(rc) {
     .replace(/-/g, "");
 }
 
-function rcFinca(rc) {
+function validarRC(rc) {
   const limpia = limpiarRC(rc);
-  if (limpia.length < 14) {
-    throw new Error("La referencia catastral debe tener al menos 14 caracteres");
+  if (![14, 18, 20].includes(limpia.length)) {
+    throw new Error("La referencia catastral debe tener 14, 18 o 20 caracteres");
   }
-  return limpia.substring(0, 14);
+  if (!/^[A-Z0-9]+$/.test(limpia)) {
+    throw new Error("La referencia catastral sólo debe contener letras y números");
+  }
+  return limpia;
 }
 
 async function geocode(direccion) {
@@ -135,22 +138,21 @@ function scoreAire(aire) {
 }
 
 async function consultarCatastro(rcOriginal) {
-  const rcLimpia = limpiarRC(rcOriginal);
-  const refCat14 = rcFinca(rcOriginal);
+  const refCat = validarRC(rcOriginal);
 
   const url =
-    "https://ovc.catastro.meh.es/ovcservweb/OVCSWLocalizacionRC/OVCCallejero.asmx/Consulta_DNPRC";
+    "https://ovc.catastro.meh.es/OVCServWeb/OVCWcfCallejero/COVCCallejero.svc/rest/Consulta_DNPRC";
 
   const r = await axios.get(url, {
     timeout: 20000,
     params: {
-      RefCat: refCat14
+      RefCat: refCat
     },
     validateStatus: () => true
   });
 
   if (r.status < 200 || r.status >= 300) {
-    throw new Error(`Catastro respondió HTTP ${r.status}. Referencia enviada: ${refCat14}`);
+    throw new Error(`Catastro respondió HTTP ${r.status}. Referencia enviada: ${refCat}`);
   }
 
   const parsed = await xml2js.parseStringPromise(r.data, {
@@ -160,18 +162,12 @@ async function consultarCatastro(rcOriginal) {
 
   const texto = JSON.stringify(parsed).toLowerCase();
 
-  if (texto.includes("error") || texto.includes("err")) {
-    return {
-      aviso: "Catastro respondió, pero puede contener aviso o error interno. Revise raw.",
-      referencia_introducida: rcLimpia,
-      referencia_usada_14: refCat14,
-      raw: parsed
-    };
-  }
-
   return {
-    referencia_introducida: rcLimpia,
-    referencia_usada_14: refCat14,
+    referencia_usada: refCat,
+    contiene_error_catastro:
+      texto.includes("error") ||
+      texto.includes("err") ||
+      texto.includes("no existe"),
     raw: parsed
   };
 }
@@ -342,10 +338,9 @@ app.get("/api/test/all", async (req, res) => {
 
       tests.catastro = {
         status: "OK",
-        referencia_introducida: data.referencia_introducida,
-        referencia_usada_14: data.referencia_usada_14,
-        parsed: Boolean(data.raw),
-        aviso: data.aviso || null
+        referencia_usada: data.referencia_usada,
+        contiene_error_catastro: data.contiene_error_catastro,
+        parsed: Boolean(data.raw)
       };
     }
 
