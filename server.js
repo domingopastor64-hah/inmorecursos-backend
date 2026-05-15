@@ -14,8 +14,20 @@ function ok(res, data = {}) {
   res.json({ status: "OK", timestamp: new Date().toISOString(), ...data });
 }
 
-function error(res, fuente, mensaje) {
-  res.json({ status: "ERROR", timestamp: new Date().toISOString(), fuente, mensaje });
+function fail(res, fuente, error) {
+  res.json({
+    status: "ERROR",
+    timestamp: new Date().toISOString(),
+    fuente,
+    mensaje: readableError(error)
+  });
+}
+
+function readableError(e) {
+  if (!e) return "Error desconocido";
+  if (e.code) return `${e.code}: ${e.message || "sin detalle"}`;
+  if (e.response?.status) return `HTTP ${e.response.status}: ${e.message || "sin detalle"}`;
+  return e.message || String(e) || "Error sin mensaje";
 }
 
 function limpiarTexto(t = "") {
@@ -32,13 +44,37 @@ function limpiarRC(rc) {
 }
 
 function toNumber(v) {
-  if (v === null || v === undefined || v === "_") return null;
-  const n = Number(String(v).replace(",", ".").replace(/[^\d.-]/g, ""));
+  if (v === null || v === undefined) return null;
+  let s = String(v).trim();
+  if (!s || limpiarTexto(s) === "nr" || s === "_") return null;
+
+  s = s.replace(/\s+/g, "");
+
+  const hasComma = s.includes(",");
+  const hasDot = s.includes(".");
+
+  if (hasComma && hasDot) {
+    const lastComma = s.lastIndexOf(",");
+    const lastDot = s.lastIndexOf(".");
+    if (lastComma > lastDot) {
+      s = s.replace(/\./g, "").replace(",", ".");
+    } else {
+      s = s.replace(/,/g, "");
+    }
+  } else if (hasComma && !hasDot) {
+    s = s.replace(",", ".");
+  }
+
+  s = s.replace(/[^\d.-]/g, "");
+  const n = Number(s);
   return Number.isFinite(n) ? n : null;
 }
 
 async function parseXML(xml) {
-  return await xml2js.parseStringPromise(xml, { explicitArray: false, mergeAttrs: true });
+  return await xml2js.parseStringPromise(xml, {
+    explicitArray: false,
+    mergeAttrs: true
+  });
 }
 
 function splitCSVLine(line) {
@@ -48,10 +84,12 @@ function splitCSVLine(line) {
 
   for (let i = 0; i < line.length; i++) {
     const ch = line[i];
+
     if (ch === '"') {
       inQuotes = !inQuotes;
       continue;
     }
+
     if (ch === "," && !inQuotes) {
       out.push(cur.trim());
       cur = "";
@@ -66,8 +104,18 @@ function splitCSVLine(line) {
 
 function parseFechaBDE(txt) {
   const meses = {
-    ene: 0, feb: 1, mar: 2, abr: 3, may: 4, jun: 5,
-    jul: 6, ago: 7, sep: 8, oct: 9, nov: 10, dic: 11
+    ene: 0,
+    feb: 1,
+    mar: 2,
+    abr: 3,
+    may: 4,
+    jun: 5,
+    jul: 6,
+    ago: 7,
+    sep: 8,
+    oct: 9,
+    nov: 10,
+    dic: 11
   };
 
   const m = String(txt || "")
@@ -79,6 +127,7 @@ function parseFechaBDE(txt) {
 
   const mesKey = m[2].normalize("NFD").replace(/[\u0300-\u036f]/g, "").slice(0, 3);
   const mes = meses[mesKey];
+
   if (mes === undefined) return null;
 
   return new Date(Number(m[3]), mes, Number(m[1]));
@@ -90,7 +139,7 @@ function parseFechaBDE(txt) {
 
 async function geocode(direccion) {
   const r = await axios.get("https://geocoding-api.open-meteo.com/v1/search", {
-    timeout: 15000,
+    timeout: 20000,
     params: {
       name: direccion,
       count: 10,
@@ -120,7 +169,7 @@ async function geocode(direccion) {
 async function openMeteo(lat, lon) {
   const [air, weather] = await Promise.all([
     axios.get("https://air-quality-api.open-meteo.com/v1/air-quality", {
-      timeout: 15000,
+      timeout: 20000,
       params: {
         latitude: lat,
         longitude: lon,
@@ -129,7 +178,7 @@ async function openMeteo(lat, lon) {
       }
     }),
     axios.get("https://api.open-meteo.com/v1/forecast", {
-      timeout: 15000,
+      timeout: 20000,
       params: {
         latitude: lat,
         longitude: lon,
@@ -179,7 +228,7 @@ function scoreAire(aire) {
 async function intentoCatastro(nombre, url, params) {
   try {
     const r = await axios.get(url, {
-      timeout: 20000,
+      timeout: 25000,
       params,
       validateStatus: () => true,
       headers: {
@@ -189,7 +238,10 @@ async function intentoCatastro(nombre, url, params) {
     });
 
     let parsed = null;
-    try { parsed = await parseXML(r.data); } catch {}
+
+    try {
+      parsed = await parseXML(r.data);
+    } catch {}
 
     return {
       nombre,
@@ -201,7 +253,12 @@ async function intentoCatastro(nombre, url, params) {
       raw: parsed
     };
   } catch (e) {
-    return { nombre, ok: false, error: e.message, params };
+    return {
+      nombre,
+      ok: false,
+      error: readableError(e),
+      params
+    };
   }
 }
 
@@ -215,29 +272,37 @@ async function diagnosticarCatastro(rcOriginal) {
 
   const rutas = [];
 
-  rutas.push(await intentoCatastro(
-    "REST WCF moderno · RefCat completo",
-    "https://ovc.catastro.meh.es/OVCServWeb/OVCWcfCallejero/COVCCallejero.svc/rest/Consulta_DNPRC",
-    { RefCat: rc20 }
-  ));
+  rutas.push(
+    await intentoCatastro(
+      "REST WCF · RefCat completo",
+      "https://ovc.catastro.meh.es/OVCServWeb/OVCWcfCallejero/COVCCallejero.svc/rest/Consulta_DNPRC",
+      { RefCat: rc20 }
+    )
+  );
 
-  rutas.push(await intentoCatastro(
-    "REST WCF moderno · RefCat 14",
-    "https://ovc.catastro.meh.es/OVCServWeb/OVCWcfCallejero/COVCCallejero.svc/rest/Consulta_DNPRC",
-    { RefCat: rc14 }
-  ));
+  rutas.push(
+    await intentoCatastro(
+      "REST WCF · RefCat 14",
+      "https://ovc.catastro.meh.es/OVCServWeb/OVCWcfCallejero/COVCCallejero.svc/rest/Consulta_DNPRC",
+      { RefCat: rc14 }
+    )
+  );
 
-  rutas.push(await intentoCatastro(
-    "ASMX clásico · RefCat completo",
-    "https://ovc.catastro.meh.es/ovcservweb/OVCSWLocalizacionRC/OVCCallejero.asmx/Consulta_DNPRC",
-    { RefCat: rc20 }
-  ));
+  rutas.push(
+    await intentoCatastro(
+      "ASMX clásico · RefCat completo",
+      "https://ovc.catastro.meh.es/ovcservweb/OVCSWLocalizacionRC/OVCCallejero.asmx/Consulta_DNPRC",
+      { RefCat: rc20 }
+    )
+  );
 
-  rutas.push(await intentoCatastro(
-    "ASMX clásico · Provincia/Municipio vacío + RC completo",
-    "https://ovc.catastro.meh.es/ovcservweb/OVCSWLocalizacionRC/OVCCallejero.asmx/Consulta_DNPRC",
-    { Provincia: "", Municipio: "", RC: rc20 }
-  ));
+  rutas.push(
+    await intentoCatastro(
+      "ASMX clásico · RC completo",
+      "https://ovc.catastro.meh.es/ovcservweb/OVCSWLocalizacionRC/OVCCallejero.asmx/Consulta_DNPRC",
+      { Provincia: "", Municipio: "", RC: rc20 }
+    )
+  );
 
   const valido = rutas.find(x => x.ok && x.parsed);
 
@@ -266,7 +331,7 @@ async function diagnosticarCatastro(rcOriginal) {
 async function ineRentaTabla30896(municipio) {
   const url = "https://servicios.ine.es/wstempus/js/es/DATOS_TABLA/30896?nult=1";
 
-  const r = await axios.get(url, { timeout: 30000 });
+  const r = await axios.get(url, { timeout: 45000 });
   const data = Array.isArray(r.data) ? r.data : [];
 
   const objetivo = limpiarTexto(municipio);
@@ -281,7 +346,11 @@ async function ineRentaTabla30896(municipio) {
     const valido = arr.find(x => x && x.Valor !== undefined && x.Valor !== null);
 
     return valido
-      ? { anyo: valido.Anyo, valor: toNumber(valido.Valor), secreto: Boolean(valido.Secreto) }
+      ? {
+          anyo: valido.Anyo,
+          valor: toNumber(valido.Valor),
+          secreto: Boolean(valido.Secreto)
+        }
       : null;
   }
 
@@ -332,11 +401,10 @@ async function ineRentaTabla30896(municipio) {
 
 async function ineRentaFallback30935(municipio) {
   const url = "https://www.ine.es/jaxiT3/files/t/xlsx/30935.xlsx";
-
-  const r = await axios.get(url, { timeout: 30000, responseType: "arraybuffer" });
+  const r = await axios.get(url, { timeout: 45000, responseType: "arraybuffer" });
   const wb = XLSX.read(r.data, { type: "buffer" });
 
-  const objetivo = limpiarTexto(municipio);
+  const objetivoExacto = limpiarTexto(municipio);
   const coincidencias = [];
 
   for (const sheetName of wb.SheetNames) {
@@ -344,8 +412,10 @@ async function ineRentaFallback30935(municipio) {
     const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: null, raw: false });
 
     rows.forEach((fila, idx) => {
-      const texto = limpiarTexto(JSON.stringify(fila));
-      if (texto.includes(objetivo)) {
+      const primera = limpiarTexto(fila?.[0] || "");
+      const sinCodigo = primera.replace(/^\d+\s+/, "").trim();
+
+      if (sinCodigo === objetivoExacto) {
         coincidencias.push({
           hoja: sheetName,
           fila_numero: idx + 1,
@@ -358,37 +428,47 @@ async function ineRentaFallback30935(municipio) {
   return {
     fuente: "INE XLS · Tabla 30935",
     municipio_buscado: municipio,
-    estado_dato: coincidencias.length ? "COINCIDENCIAS_DEBUG" : "NO_DISPONIBLE",
-    coincidencias: coincidencias.slice(0, 80),
+    estado_dato: coincidencias.length ? "COINCIDENCIA_MUNICIPAL" : "NO_DISPONIBLE",
     total_coincidencias: coincidencias.length,
+    coincidencias: coincidencias.slice(0, 5),
     aviso: coincidencias.length
-      ? "INE 30935 contiene coincidencias del municipio. Falta convertir la estructura XLS en indicadores consolidados."
-      : "INE 30935 respondió, pero no se localizaron coincidencias del municipio."
+      ? "Coincidencia municipal exacta localizada. Pendiente convertir columnas en indicadores consolidados."
+      : "INE 30935 respondió, pero no se localizó coincidencia municipal exacta."
   };
 }
 
 async function ineRenta(municipio) {
-  const principal = await ineRentaTabla30896(municipio);
+  try {
+    const principal = await ineRentaTabla30896(municipio);
 
-  if (principal.estado_dato === "OK") {
+    if (principal.estado_dato === "OK") {
+      return {
+        ...principal,
+        metodo_usado: "WSTempus 30896"
+      };
+    }
+
+    const fallback = await ineRentaFallback30935(municipio);
+
     return {
-      ...principal,
-      metodo_usado: "WSTempus 30896"
+      fuente: "INE · Renta y contexto socioeconómico",
+      municipio_buscado: municipio,
+      estado_dato: fallback.total_coincidencias > 0 ? "FALLBACK_DEBUG" : "NO_DISPONIBLE",
+      tabla_30896: principal,
+      tabla_30935: fallback,
+      aviso: fallback.total_coincidencias > 0
+        ? "No hubo dato municipal en 30896, pero sí coincidencia exacta en 30935. Pendiente consolidar columnas."
+        : "No se localizaron datos útiles para este municipio en las fuentes INE probadas."
+    };
+  } catch (e) {
+    return {
+      fuente: "INE · Renta y contexto socioeconómico",
+      municipio_buscado: municipio,
+      estado_dato: "ERROR",
+      mensaje: readableError(e),
+      aviso: "INE no respondió de forma estable. No se sustituye por estimaciones."
     };
   }
-
-  const fallback = await ineRentaFallback30935(municipio);
-
-  return {
-    fuente: "INE · Renta y contexto socioeconómico",
-    municipio_buscado: municipio,
-    estado_dato: fallback.total_coincidencias > 0 ? "FALLBACK_DEBUG" : "NO_DISPONIBLE",
-    tabla_30896: principal,
-    tabla_30935: fallback,
-    aviso: fallback.total_coincidencias > 0
-      ? "No hubo dato municipal en 30896, pero sí coincidencias en 30935. Usar como diagnóstico hasta parser final."
-      : "No se localizaron datos útiles para este municipio en las fuentes INE probadas."
-  };
 }
 
 /* =========================
@@ -402,7 +482,9 @@ function parseBdeCSV(text) {
   const aliasRow = parsed.find(row => limpiarTexto(row[0]).includes("alias de la serie"));
   const descRow = parsed.find(row => limpiarTexto(row[0]).includes("descripcion de la serie"));
 
-  if (!aliasRow) throw new Error("No se encontró la fila de alias de series en el CSV del Banco de España");
+  if (!aliasRow) {
+    throw new Error("No se encontró la fila de alias de series en el CSV del Banco de España");
+  }
 
   const indexEuribor12 = aliasRow.findIndex(x => limpiarTexto(x) === "ti_1_7.7");
 
@@ -427,13 +509,15 @@ function parseBdeCSV(text) {
     }
   }
 
-  if (!valores.length) throw new Error("La serie Euríbor 12 meses no contiene valores numéricos");
+  if (!valores.length) {
+    throw new Error("La serie Euríbor 12 meses no contiene valores numéricos");
+  }
 
   valores.sort((a, b) => new Date(a.fecha) - new Date(b.fecha));
 
   const ultimo = valores[valores.length - 1];
-  const maximo = valores.reduce((a, b) => b.valor > a.valor ? b : a, valores[0]);
-  const minimo = valores.reduce((a, b) => b.valor < a.valor ? b : a, valores[0]);
+  const maximo = valores.reduce((a, b) => (b.valor > a.valor ? b : a), valores[0]);
+  const minimo = valores.reduce((a, b) => (b.valor < a.valor ? b : a), valores[0]);
 
   const fechaLimite10y = new Date();
   fechaLimite10y.setFullYear(fechaLimite10y.getFullYear() - 10);
@@ -464,18 +548,134 @@ async function bdeEuribor() {
 }
 
 /* =========================
-   MIVAU · VALOR TASADO
+   MIVAU · VALOR TASADO LIMPIO
 ========================= */
 
 const MIVAU_BASE = "https://apps.fomento.gob.es/boletinonline2/";
-const MIVAU_XLS = [
-  "sedal/35101000.XLS",
-  "sedal/35101500.XLS",
-  "sedal/35102000.XLS",
-  "sedal/35102500.XLS",
-  "sedal/35103000.XLS",
-  "sedal/35103500.XLS"
-];
+const MIVAU_XLS_MUNICIPIOS = "sedal/35103500.XLS";
+
+function parsePeriodoMivau(sheetName) {
+  const m = String(sheetName || "").match(/^T([1-4])A(\d{4})$/i);
+  if (!m) return null;
+  return {
+    trimestre: Number(m[1]),
+    anyo: Number(m[2]),
+    etiqueta: `T${m[1]} ${m[2]}`,
+    orden: Number(m[2]) * 10 + Number(m[1])
+  };
+}
+
+async function leerMivauMunicipios() {
+  const url = MIVAU_BASE + MIVAU_XLS_MUNICIPIOS;
+  const r = await axios.get(url, { timeout: 45000, responseType: "arraybuffer" });
+  const wb = XLSX.read(r.data, { type: "buffer" });
+
+  const registros = [];
+
+  for (const sheetName of wb.SheetNames) {
+    const periodo = parsePeriodoMivau(sheetName);
+    if (!periodo) continue;
+
+    const sheet = wb.Sheets[sheetName];
+    const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: null, raw: false });
+
+    for (let i = 0; i < rows.length; i++) {
+      const fila = rows[i];
+
+      const municipio = String(fila?.[2] || "").trim();
+      if (!municipio) continue;
+
+      const municipioLimpio = limpiarTexto(municipio);
+      if (!municipioLimpio || municipioLimpio.includes("municipio")) continue;
+
+      let valorNueva = toNumber(fila[3]);
+      let valorUsada = toNumber(fila[4]);
+      let valorTotal = toNumber(fila[5]);
+      let tasacionesNueva = toNumber(fila[7]);
+      let tasacionesUsada = toNumber(fila[8]);
+      let tasacionesTotal = toNumber(fila[9]);
+
+      if (periodo.anyo < 2010) {
+        valorNueva = null;
+        valorUsada = null;
+        valorTotal = toNumber(fila[3]);
+        tasacionesNueva = null;
+        tasacionesUsada = null;
+        tasacionesTotal = toNumber(fila[5]);
+      }
+
+      if (valorNueva === null && valorUsada === null && valorTotal === null) continue;
+
+      registros.push({
+        municipio,
+        municipio_limpio: municipioLimpio,
+        archivo: MIVAU_XLS_MUNICIPIOS,
+        hoja: sheetName,
+        fila_numero: i + 1,
+        periodo: periodo.etiqueta,
+        anyo: periodo.anyo,
+        trimestre: periodo.trimestre,
+        orden: periodo.orden,
+        valor_tasado_nueva: valorNueva,
+        valor_tasado_usada: valorUsada,
+        valor_tasado_total: valorTotal,
+        tasaciones_nueva: tasacionesNueva,
+        tasaciones_usada: tasacionesUsada,
+        tasaciones_total: tasacionesTotal
+      });
+    }
+  }
+
+  return registros;
+}
+
+async function mivauValorTasado(municipio) {
+  const objetivo = limpiarTexto(municipio);
+  const registros = await leerMivauMunicipios();
+
+  const serie = registros
+    .filter(r => r.municipio_limpio === objetivo)
+    .sort((a, b) => a.orden - b.orden);
+
+  if (!serie.length) {
+    return {
+      fuente: "MIVAU · Valor tasado vivienda · municipios >25.000 habitantes",
+      municipio_buscado: municipio,
+      estado_dato: "NO_DISPONIBLE",
+      mensaje: "No se localizó el municipio en el XLS oficial de municipios.",
+      aviso: "No se inventa dato alternativo."
+    };
+  }
+
+  const ultimo = serie[serie.length - 1];
+
+  return {
+    fuente: "MIVAU · Valor tasado vivienda · municipios >25.000 habitantes",
+    municipio_buscado: municipio,
+    estado_dato: "OK",
+    ultimo_periodo: ultimo.periodo,
+    ultimo: {
+      municipio: ultimo.municipio,
+      periodo: ultimo.periodo,
+      anyo: ultimo.anyo,
+      trimestre: ultimo.trimestre,
+      valor_tasado_nueva: ultimo.valor_tasado_nueva,
+      valor_tasado_usada: ultimo.valor_tasado_usada,
+      valor_tasado_total: ultimo.valor_tasado_total,
+      tasaciones_nueva: ultimo.tasaciones_nueva,
+      tasaciones_usada: ultimo.tasaciones_usada,
+      tasaciones_total: ultimo.tasaciones_total
+    },
+    serie_historica_ultimos_8: serie.slice(-8).map(r => ({
+      periodo: r.periodo,
+      valor_tasado_nueva: r.valor_tasado_nueva,
+      valor_tasado_usada: r.valor_tasado_usada,
+      valor_tasado_total: r.valor_tasado_total,
+      tasaciones_total: r.tasaciones_total
+    })),
+    aviso: "Dato extraído del XLS oficial MIVAU de municipios. Usar como referencia oficial de valor tasado, no como precio exacto de cierre."
+  };
+}
 
 async function mivauTest() {
   const url = "https://apps.fomento.gob.es/boletinonline2/?nivel=2&orden=35000000";
@@ -492,99 +692,10 @@ async function mivauTest() {
     longitud_html: html.length,
     contiene_valor_tasado: limpiarTexto(html).includes("valor tasado"),
     contiene_municipios_25000:
-      limpiarTexto(html).includes("25.000") ||
-      limpiarTexto(html).includes("25000"),
+      limpiarTexto(html).includes("25.000") || limpiarTexto(html).includes("25000"),
     enlaces_xls_detectados: xls,
-    xls_usados_por_backend: MIVAU_XLS,
-    aviso: "MIVAU responde y se han localizado ficheros XLS oficiales."
-  };
-}
-
-async function leerXLSMivau(path, full = false) {
-  const url = MIVAU_BASE + path;
-  const r = await axios.get(url, { timeout: 30000, responseType: "arraybuffer" });
-  const workbook = XLSX.read(r.data, { type: "buffer" });
-
-  const hojas = workbook.SheetNames.map(name => {
-    const sheet = workbook.Sheets[name];
-    const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: null, raw: false });
-
-    return {
-      nombre: name,
-      total_filas: rows.length,
-      primeras_filas: rows.slice(0, 14),
-      filas: full ? rows : undefined
-    };
-  });
-
-  return { archivo: path, url, hojas };
-}
-
-async function mivauDebugXLS() {
-  const archivos = [];
-
-  for (const path of MIVAU_XLS) {
-    try {
-      archivos.push({
-        status: "OK",
-        ...(await leerXLSMivau(path, false))
-      });
-    } catch (e) {
-      archivos.push({ status: "ERROR", archivo: path, mensaje: e.message });
-    }
-  }
-
-  return {
-    fuente: "MIVAU · XLS oficiales de valor tasado",
-    archivos
-  };
-}
-
-async function mivauValorTasado(municipio) {
-  const objetivo = limpiarTexto(municipio);
-  const coincidencias = [];
-
-  for (const path of MIVAU_XLS) {
-    try {
-      const archivo = await leerXLSMivau(path, true);
-
-      for (const hoja of archivo.hojas) {
-        for (let i = 0; i < hoja.filas.length; i++) {
-          const fila = hoja.filas[i];
-          const texto = limpiarTexto(JSON.stringify(fila));
-
-          if (texto.includes(objetivo)) {
-            const numeros = fila
-              .map(x => toNumber(x))
-              .filter(x => x !== null);
-
-            coincidencias.push({
-              archivo: archivo.archivo,
-              hoja: hoja.nombre,
-              fila_numero: i + 1,
-              fila,
-              numeros_detectados: numeros
-            });
-          }
-        }
-      }
-    } catch (e) {
-      coincidencias.push({
-        archivo: path,
-        error: e.message
-      });
-    }
-  }
-
-  return {
-    fuente: "MIVAU · Valor tasado vivienda",
-    municipio_buscado: municipio,
-    estado_dato: coincidencias.length ? "COINCIDENCIAS_DEBUG" : "NO_DISPONIBLE",
-    total_coincidencias: coincidencias.length,
-    coincidencias: coincidencias.slice(0, 80),
-    aviso: coincidencias.length
-      ? "Se han localizado coincidencias en XLS oficiales. Falta parser definitivo por columnas antes de usarlo como dato decisorio."
-      : "No se localizaron coincidencias del municipio en los XLS oficiales inspeccionados."
+    archivo_municipios_usado: MIVAU_XLS_MUNICIPIOS,
+    aviso: "MIVAU responde y el backend usa el XLS municipal para obtener valor tasado por municipio."
   };
 }
 
@@ -595,32 +706,39 @@ async function mivauValorTasado(municipio) {
 app.get("/", (_, res) => {
   ok(res, {
     servicio: "InmoRecursos · Punto de Control de Compra",
-    fase: "Catastro + OpenMeteo + INE + Banco de España + MIVAU",
+    fase: "Catastro + OpenMeteo + Banco de España + MIVAU limpio + INE controlado",
     endpoints: [
       "/health",
       "/api/geocode?direccion=Plasencia",
       "/api/entorno?direccion=Plasencia",
-      "/api/catastro-test?rc=REFERENCIA",
       "/api/catastro?rc=REFERENCIA",
+      "/api/catastro-test?rc=REFERENCIA",
       "/api/ine-renta?municipio=Plasencia",
       "/api/bde/euribor",
       "/api/mivau/test",
-      "/api/mivau/debug/xls",
       "/api/mivau/valor-tasado?municipio=Plasencia",
+      "/api/test/light",
       "/api/test/oficiales?municipio=Plasencia",
       "/api/test/all?rc=REFERENCIA"
     ]
   });
 });
 
-app.get("/health", (_, res) => ok(res, { estado: "Servidor activo" }));
+app.get("/health", (_, res) => {
+  ok(res, {
+    estado: "Servidor activo"
+  });
+});
 
 app.get("/api/geocode", async (req, res) => {
   try {
     if (!req.query.direccion) throw new Error("Falta el parámetro direccion");
-    ok(res, { fuente: "Open-Meteo Geocoding", geocoding: await geocode(req.query.direccion) });
+    ok(res, {
+      fuente: "Open-Meteo Geocoding",
+      geocoding: await geocode(req.query.direccion)
+    });
   } catch (e) {
-    error(res, "Open-Meteo Geocoding", e.message);
+    fail(res, "Open-Meteo Geocoding", e);
   }
 });
 
@@ -628,14 +746,22 @@ app.get("/api/openmeteo", async (req, res) => {
   try {
     const lat = Number(req.query.lat);
     const lon = Number(req.query.lon);
-    if (!Number.isFinite(lat) || !Number.isFinite(lon)) throw new Error("Faltan coordenadas válidas");
+
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+      throw new Error("Faltan coordenadas válidas");
+    }
 
     const data = await openMeteo(lat, lon);
     const puntuacion = scoreAire(data.aire);
 
-    ok(res, { ...data, lectura_entorno: { puntuacion_aire: puntuacion } });
+    ok(res, {
+      ...data,
+      lectura_entorno: {
+        puntuacion_aire: puntuacion
+      }
+    });
   } catch (e) {
-    error(res, "Open-Meteo", e.message);
+    fail(res, "Open-Meteo", e);
   }
 });
 
@@ -664,16 +790,19 @@ app.get("/api/entorno", async (req, res) => {
       }
     });
   } catch (e) {
-    error(res, "Entorno", e.message);
+    fail(res, "Entorno", e);
   }
 });
 
 app.get("/api/catastro-test", async (req, res) => {
   try {
     if (!req.query.rc) throw new Error("Falta la referencia catastral");
-    ok(res, { fuente: "Diagnóstico Catastro", catastro_test: await diagnosticarCatastro(req.query.rc) });
+    ok(res, {
+      fuente: "Diagnóstico Catastro",
+      catastro_test: await diagnosticarCatastro(req.query.rc)
+    });
   } catch (e) {
-    error(res, "Diagnóstico Catastro", e.message);
+    fail(res, "Diagnóstico Catastro", e);
   }
 });
 
@@ -701,7 +830,7 @@ app.get("/api/catastro", async (req, res) => {
       catastro_test: data
     });
   } catch (e) {
-    error(res, "Dirección General del Catastro", e.message);
+    fail(res, "Dirección General del Catastro", e);
   }
 });
 
@@ -710,7 +839,7 @@ app.get("/api/ine-renta", async (req, res) => {
     if (!req.query.municipio) throw new Error("Falta el parámetro municipio");
     ok(res, await ineRenta(req.query.municipio));
   } catch (e) {
-    error(res, "INE renta", e.message);
+    fail(res, "INE renta", e);
   }
 });
 
@@ -718,7 +847,7 @@ app.get("/api/bde/euribor", async (_, res) => {
   try {
     ok(res, await bdeEuribor());
   } catch (e) {
-    error(res, "Banco de España · Euríbor", e.message);
+    fail(res, "Banco de España · Euríbor", e);
   }
 });
 
@@ -726,15 +855,7 @@ app.get("/api/mivau/test", async (_, res) => {
   try {
     ok(res, await mivauTest());
   } catch (e) {
-    error(res, "MIVAU · Valor tasado", e.message);
-  }
-});
-
-app.get("/api/mivau/debug/xls", async (_, res) => {
-  try {
-    ok(res, await mivauDebugXLS());
-  } catch (e) {
-    error(res, "MIVAU · Debug XLS", e.message);
+    fail(res, "MIVAU · Test", e);
   }
 });
 
@@ -743,67 +864,125 @@ app.get("/api/mivau/valor-tasado", async (req, res) => {
     if (!req.query.municipio) throw new Error("Falta el parámetro municipio");
     ok(res, await mivauValorTasado(req.query.municipio));
   } catch (e) {
-    error(res, "MIVAU · Valor tasado", e.message);
+    fail(res, "MIVAU · Valor tasado", e);
   }
+});
+
+/* =========================
+   TESTS
+========================= */
+
+app.get("/api/test/light", async (_, res) => {
+  ok(res, {
+    mensaje: "Servidor activo. Este test no llama APIs externas pesadas.",
+    endpoints_recomendados: [
+      "/api/bde/euribor",
+      "/api/mivau/valor-tasado?municipio=Plasencia",
+      "/api/entorno?direccion=Plasencia",
+      "/api/catastro?rc=REFERENCIA"
+    ]
+  });
 });
 
 app.get("/api/test/oficiales", async (req, res) => {
   const municipio = req.query.municipio || "Plasencia";
   const tests = {};
 
-  try { tests.ine_renta = { status: "OK", data: await ineRenta(municipio) }; }
-  catch (e) { tests.ine_renta = { status: "ERROR", mensaje: e.message }; }
+  try {
+    tests.banco_espana = {
+      status: "OK",
+      data: await bdeEuribor()
+    };
+  } catch (e) {
+    tests.banco_espana = {
+      status: "ERROR",
+      mensaje: readableError(e)
+    };
+  }
 
-  try { tests.banco_espana = { status: "OK", data: await bdeEuribor() }; }
-  catch (e) { tests.banco_espana = { status: "ERROR", mensaje: e.message }; }
+  try {
+    tests.mivau_valor_tasado = {
+      status: "OK",
+      data: await mivauValorTasado(municipio)
+    };
+  } catch (e) {
+    tests.mivau_valor_tasado = {
+      status: "ERROR",
+      mensaje: readableError(e)
+    };
+  }
 
-  try { tests.mivau = { status: "OK", data: await mivauTest() }; }
-  catch (e) { tests.mivau = { status: "ERROR", mensaje: e.message }; }
+  try {
+    tests.ine_renta = {
+      status: "OK",
+      data: await ineRenta(municipio)
+    };
+  } catch (e) {
+    tests.ine_renta = {
+      status: "ERROR",
+      mensaje: readableError(e)
+    };
+  }
 
-  try { tests.mivau_xls = { status: "OK", data: await mivauValorTasado(municipio) }; }
-  catch (e) { tests.mivau_xls = { status: "ERROR", mensaje: e.message }; }
-
-  ok(res, { municipio, tests });
+  ok(res, {
+    municipio,
+    tests
+  });
 });
 
 app.get("/api/test/all", async (req, res) => {
   const tests = {};
 
-  try { tests.geocode = { status: "OK", data: await geocode("Plasencia") }; }
-  catch (e) { tests.geocode = { status: "ERROR", mensaje: e.message }; }
-
-  try { tests.openmeteo = { status: "OK", data: await openMeteo(40.0312, -6.0885) }; }
-  catch (e) { tests.openmeteo = { status: "ERROR", mensaje: e.message }; }
-
   try {
-    if (!req.query.rc) {
-      tests.catastro = { status: "ERROR", mensaje: "Para probar Catastro use /api/test/all?rc=SU_REFERENCIA_CATASTRAL_REAL" };
-    } else {
-      const data = await diagnosticarCatastro(req.query.rc);
-      tests.catastro = {
-        status: data.exito ? "OK" : "ERROR",
-        endpoint_valido: data.endpoint_valido,
-        referencia_introducida: data.referencia_introducida,
-        referencia_14: data.referencia_14
-      };
-    }
+    tests.banco_espana = {
+      status: "OK",
+      data: await bdeEuribor()
+    };
   } catch (e) {
-    tests.catastro = { status: "ERROR", mensaje: e.message };
+    tests.banco_espana = {
+      status: "ERROR",
+      mensaje: readableError(e)
+    };
   }
 
-  try { tests.ine_renta = { status: "OK", data: await ineRenta("Plasencia") }; }
-  catch (e) { tests.ine_renta = { status: "ERROR", mensaje: e.message }; }
+  try {
+    tests.mivau_valor_tasado = {
+      status: "OK",
+      data: await mivauValorTasado("Plasencia")
+    };
+  } catch (e) {
+    tests.mivau_valor_tasado = {
+      status: "ERROR",
+      mensaje: readableError(e)
+    };
+  }
 
-  try { tests.banco_espana = { status: "OK", data: await bdeEuribor() }; }
-  catch (e) { tests.banco_espana = { status: "ERROR", mensaje: e.message }; }
+  if (req.query.rc) {
+    try {
+      const cat = await diagnosticarCatastro(req.query.rc);
+      tests.catastro = {
+        status: cat.exito ? "OK" : "ERROR",
+        endpoint_valido: cat.endpoint_valido,
+        referencia_introducida: cat.referencia_introducida,
+        referencia_14: cat.referencia_14
+      };
+    } catch (e) {
+      tests.catastro = {
+        status: "ERROR",
+        mensaje: readableError(e)
+      };
+    }
+  } else {
+    tests.catastro = {
+      status: "NO_PROBADO",
+      mensaje: "Añada ?rc=REFERENCIA_CATASTRAL_REAL para probar Catastro"
+    };
+  }
 
-  try { tests.mivau = { status: "OK", data: await mivauTest() }; }
-  catch (e) { tests.mivau = { status: "ERROR", mensaje: e.message }; }
-
-  try { tests.mivau_xls = { status: "OK", data: await mivauValorTasado("Plasencia") }; }
-  catch (e) { tests.mivau_xls = { status: "ERROR", mensaje: e.message }; }
-
-  ok(res, { tests });
+  ok(res, {
+    tests,
+    aviso: "Test reducido para evitar saturar fuentes externas. Entorno e INE deben probarse en sus endpoints propios."
+  });
 });
 
 app.listen(PORT, () => {
