@@ -31,7 +31,21 @@ function toNumber(v) {
   return Number.isFinite(n) ? n : null;
 }
 
-/* GEOCODING ESPAÑA */
+function limpiarRC(rc) {
+  return String(rc || "")
+    .toUpperCase()
+    .replace(/\s/g, "")
+    .replace(/-/g, "");
+}
+
+function rcFinca(rc) {
+  const limpia = limpiarRC(rc);
+  if (limpia.length < 14) {
+    throw new Error("La referencia catastral debe tener al menos 14 caracteres");
+  }
+  return limpia.substring(0, 14);
+}
+
 async function geocode(direccion) {
   const r = await axios.get("https://geocoding-api.open-meteo.com/v1/search", {
     timeout: 15000,
@@ -48,7 +62,6 @@ async function geocode(direccion) {
 
   const item =
     results.find(x => String(x.country_code || "").toUpperCase() === "ES") ||
-    results.find(x => String(x.country || "").toLowerCase().includes("espa")) ||
     results[0];
 
   if (!item) {
@@ -66,7 +79,6 @@ async function geocode(direccion) {
   };
 }
 
-/* OPEN METEO */
 async function openMeteo(lat, lon) {
   const [air, weather] = await Promise.all([
     axios.get("https://air-quality-api.open-meteo.com/v1/air-quality", {
@@ -122,7 +134,48 @@ function scoreAire(aire) {
   return Math.max(0, Math.min(100, Math.round(score)));
 }
 
-/* HOME */
+async function consultarCatastro(rcOriginal) {
+  const rcLimpia = limpiarRC(rcOriginal);
+  const refCat14 = rcFinca(rcOriginal);
+
+  const url =
+    "https://ovc.catastro.meh.es/ovcservweb/OVCSWLocalizacionRC/OVCCallejero.asmx/Consulta_DNPRC";
+
+  const r = await axios.get(url, {
+    timeout: 20000,
+    params: {
+      RefCat: refCat14
+    },
+    validateStatus: () => true
+  });
+
+  if (r.status < 200 || r.status >= 300) {
+    throw new Error(`Catastro respondió HTTP ${r.status}. Referencia enviada: ${refCat14}`);
+  }
+
+  const parsed = await xml2js.parseStringPromise(r.data, {
+    explicitArray: false,
+    mergeAttrs: true
+  });
+
+  const texto = JSON.stringify(parsed).toLowerCase();
+
+  if (texto.includes("error") || texto.includes("err")) {
+    return {
+      aviso: "Catastro respondió, pero puede contener aviso o error interno. Revise raw.",
+      referencia_introducida: rcLimpia,
+      referencia_usada_14: refCat14,
+      raw: parsed
+    };
+  }
+
+  return {
+    referencia_introducida: rcLimpia,
+    referencia_usada_14: refCat14,
+    raw: parsed
+  };
+}
+
 app.get("/", (_, res) => {
   ok(res, {
     servicio: "InmoRecursos · Punto de Control de Compra",
@@ -137,14 +190,12 @@ app.get("/", (_, res) => {
   });
 });
 
-/* HEALTH */
 app.get("/health", (_, res) => {
   ok(res, {
     estado: "Servidor activo"
   });
 });
 
-/* GEOCODE */
 app.get("/api/geocode", async (req, res) => {
   try {
     const direccion = req.query.direccion;
@@ -165,7 +216,6 @@ app.get("/api/geocode", async (req, res) => {
   }
 });
 
-/* OPENMETEO DIRECTO */
 app.get("/api/openmeteo", async (req, res) => {
   try {
     const lat = Number(req.query.lat);
@@ -196,7 +246,6 @@ app.get("/api/openmeteo", async (req, res) => {
   }
 });
 
-/* ENTORNO POR DIRECCIÓN */
 app.get("/api/entorno", async (req, res) => {
   try {
     const direccion = req.query.direccion;
@@ -231,7 +280,6 @@ app.get("/api/entorno", async (req, res) => {
   }
 });
 
-/* CATASTRO */
 app.get("/api/catastro", async (req, res) => {
   try {
     const rc = req.query.rc;
@@ -240,25 +288,11 @@ app.get("/api/catastro", async (req, res) => {
       throw new Error("Falta la referencia catastral");
     }
 
-    const url =
-      "https://ovc.catastro.meh.es/ovcservweb/OVCSWLocalizacionRC/OVCCallejero.asmx/Consulta_DNPRC";
-
-    const r = await axios.get(url, {
-      timeout: 20000,
-      params: {
-        RefCat: rc
-      }
-    });
-
-    const parsed = await xml2js.parseStringPromise(r.data, {
-      explicitArray: false,
-      mergeAttrs: true
-    });
+    const data = await consultarCatastro(rc);
 
     ok(res, {
       fuente: "Dirección General del Catastro",
-      referencia_catastral: rc,
-      catastro: parsed
+      catastro: data
     });
 
   } catch (e) {
@@ -266,7 +300,6 @@ app.get("/api/catastro", async (req, res) => {
   }
 });
 
-/* TEST GENERAL */
 app.get("/api/test/all", async (req, res) => {
   const tests = {};
 
@@ -305,25 +338,14 @@ app.get("/api/test/all", async (req, res) => {
         mensaje: "Para probar Catastro use /api/test/all?rc=SU_REFERENCIA_CATASTRAL_REAL"
       };
     } else {
-      const url =
-        "https://ovc.catastro.meh.es/ovcservweb/OVCSWLocalizacionRC/OVCCallejero.asmx/Consulta_DNPRC";
-
-      const r = await axios.get(url, {
-        timeout: 20000,
-        params: {
-          RefCat: refcat
-        }
-      });
-
-      const parsed = await xml2js.parseStringPromise(r.data, {
-        explicitArray: false,
-        mergeAttrs: true
-      });
+      const data = await consultarCatastro(refcat);
 
       tests.catastro = {
         status: "OK",
-        refcat,
-        parsed: Boolean(parsed)
+        referencia_introducida: data.referencia_introducida,
+        referencia_usada_14: data.referencia_usada_14,
+        parsed: Boolean(data.raw),
+        aviso: data.aviso || null
       };
     }
 
@@ -339,7 +361,6 @@ app.get("/api/test/all", async (req, res) => {
   });
 });
 
-/* START */
 app.listen(PORT, () => {
   console.log(`Servidor Punto de Control activo en puerto ${PORT}`);
 });
