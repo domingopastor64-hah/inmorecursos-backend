@@ -1,236 +1,289 @@
-// ======================================================
-// server.js · TEST REAL FUENTES OFICIALES
-// Punto de Control · InmoRecursos
-// ======================================================
-
 import express from "express";
 import cors from "cors";
 import axios from "axios";
 import xml2js from "xml2js";
-import dotenv from "dotenv";
-
-dotenv.config();
 
 const app = express();
+const PORT = process.env.PORT || 10000;
 
-app.use(cors());
+app.use(cors({ origin: "*" }));
 app.use(express.json());
 
-const PORT = process.env.PORT || 3000;
-
-// ======================================================
-// HELPERS
-// ======================================================
-
-async function parseXML(xml) {
-  return await xml2js.parseStringPromise(xml, {
-    explicitArray: false,
-    mergeAttrs: true
+function ok(res, data = {}) {
+  res.json({
+    status: "OK",
+    timestamp: new Date().toISOString(),
+    ...data
   });
 }
 
-function safeNumber(v) {
-  if (v === null || v === undefined) return null;
-
-  const n = Number(
-    String(v)
-      .replace(",", ".")
-      .replace(/[^\d.-]/g, "")
-  );
-
-  return isNaN(n) ? null : n;
+function error(res, fuente, mensaje) {
+  res.json({
+    status: "ERROR",
+    timestamp: new Date().toISOString(),
+    fuente,
+    mensaje
+  });
 }
 
-// ======================================================
-// TEST GENERAL
-// ======================================================
+function toNumber(v) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
 
-app.get("/api/test/all", async (req, res) => {
+async function geocode(direccion) {
+  const r = await axios.get("https://geocoding-api.open-meteo.com/v1/search", {
+    timeout: 15000,
+    params: {
+      name: direccion,
+      count: 1,
+      language: "es",
+      format: "json"
+    }
+  });
 
-  const result = {
-    server: "OK",
-    timestamp: new Date().toISOString(),
-    tests: {}
+  const item = r.data?.results?.[0];
+  if (!item) throw new Error("No se pudo localizar la dirección o municipio");
+
+  return {
+    lat: item.latitude,
+    lon: item.longitude,
+    municipio: item.name,
+    provincia: item.admin2 || "",
+    comunidad: item.admin1 || "",
+    pais: item.country || ""
   };
+}
 
-  // ====================================================
-  // 1. TEST CATASTRO
-  // ====================================================
+async function openMeteo(lat, lon) {
+  const [air, weather] = await Promise.all([
+    axios.get("https://air-quality-api.open-meteo.com/v1/air-quality", {
+      timeout: 15000,
+      params: {
+        latitude: lat,
+        longitude: lon,
+        current: "pm10,pm2_5,nitrogen_dioxide,ozone,european_aqi",
+        timezone: "Europe/Madrid"
+      }
+    }),
+    axios.get("https://api.open-meteo.com/v1/forecast", {
+      timeout: 15000,
+      params: {
+        latitude: lat,
+        longitude: lon,
+        current: "temperature_2m,relative_humidity_2m,wind_speed_10m,uv_index",
+        timezone: "Europe/Madrid"
+      }
+    })
+  ]);
 
+  const a = air.data.current || {};
+  const m = weather.data.current || {};
+
+  return {
+    fuente: "Open-Meteo",
+    aire: {
+      pm10: toNumber(a.pm10),
+      pm25: toNumber(a.pm2_5),
+      no2: toNumber(a.nitrogen_dioxide),
+      ozono: toNumber(a.ozone),
+      aqi_europeo: toNumber(a.european_aqi)
+    },
+    meteo: {
+      temperatura: toNumber(m.temperature_2m),
+      humedad: toNumber(m.relative_humidity_2m),
+      viento: toNumber(m.wind_speed_10m),
+      uvi: toNumber(m.uv_index)
+    }
+  };
+}
+
+function scoreAire(aire) {
+  let score = 100;
+
+  if (aire.pm25 !== null) score -= aire.pm25 > 25 ? 28 : aire.pm25 > 10 ? 12 : 0;
+  if (aire.pm10 !== null) score -= aire.pm10 > 40 ? 20 : aire.pm10 > 20 ? 8 : 0;
+  if (aire.no2 !== null) score -= aire.no2 > 40 ? 20 : aire.no2 > 20 ? 8 : 0;
+  if (aire.ozono !== null) score -= aire.ozono > 120 ? 14 : aire.ozono > 100 ? 6 : 0;
+  if (aire.aqi_europeo !== null) score -= aire.aqi_europeo > 50 ? 20 : aire.aqi_europeo > 20 ? 8 : 0;
+
+  return Math.max(0, Math.min(100, Math.round(score)));
+}
+
+app.get("/", (_, res) => {
+  ok(res, {
+    servicio: "InmoRecursos · Punto de Control de Compra",
+    endpoints: [
+      "/health",
+      "/api/test/all",
+      "/api/geocode?direccion=Plasencia",
+      "/api/openmeteo?lat=40.0312&lon=-6.0885",
+      "/api/entorno?direccion=Plasencia",
+      "/api/catastro?rc=REFERENCIA_CATASTRAL"
+    ]
+  });
+});
+
+app.get("/health", (_, res) => {
+  ok(res, {
+    estado: "Servidor activo"
+  });
+});
+
+app.get("/api/geocode", async (req, res) => {
   try {
+    const direccion = req.query.direccion;
+    if (!direccion) throw new Error("Falta el parámetro direccion");
 
-    const refcat = "1481301QE2318S0001WK";
+    const data = await geocode(direccion);
+
+    ok(res, {
+      fuente: "Open-Meteo Geocoding",
+      geocoding: data
+    });
+  } catch (e) {
+    error(res, "Open-Meteo Geocoding", e.message);
+  }
+});
+
+app.get("/api/openmeteo", async (req, res) => {
+  try {
+    const lat = Number(req.query.lat);
+    const lon = Number(req.query.lon);
+
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+      throw new Error("Faltan coordenadas válidas");
+    }
+
+    const data = await openMeteo(lat, lon);
+    const puntuacion = scoreAire(data.aire);
+
+    ok(res, {
+      ...data,
+      lectura_entorno: {
+        puntuacion_aire: puntuacion,
+        lectura:
+          puntuacion >= 70
+            ? "Entorno ambiental favorable"
+            : puntuacion >= 45
+              ? "Entorno ambiental funcional"
+              : "Entorno ambiental condicionante"
+      }
+    });
+  } catch (e) {
+    error(res, "Open-Meteo", e.message);
+  }
+});
+
+app.get("/api/entorno", async (req, res) => {
+  try {
+    const direccion = req.query.direccion;
+    if (!direccion) throw new Error("Falta el parámetro direccion");
+
+    const geo = await geocode(direccion);
+    const meteo = await openMeteo(geo.lat, geo.lon);
+    const puntuacion = scoreAire(meteo.aire);
+
+    ok(res, {
+      fuente: "Open-Meteo Geocoding + Open-Meteo",
+      direccion_solicitada: direccion,
+      geocoding: geo,
+      aire: meteo.aire,
+      meteo: meteo.meteo,
+      lectura_entorno: {
+        puntuacion_aire: puntuacion,
+        lectura:
+          puntuacion >= 70
+            ? "Entorno ambiental favorable"
+            : puntuacion >= 45
+              ? "Entorno ambiental funcional"
+              : "Entorno ambiental condicionante"
+      }
+    });
+  } catch (e) {
+    error(res, "Entorno", e.message);
+  }
+});
+
+app.get("/api/catastro", async (req, res) => {
+  try {
+    const rc = req.query.rc;
+    if (!rc) throw new Error("Falta la referencia catastral");
 
     const url =
-      `https://ovc.catastro.meh.es/ovcservweb/OVCSWLocalizacionRC/OVCCallejero.asmx/Consulta_DNPRC?RefCat=${refcat}`;
+      "https://ovc.catastro.meh.es/ovcservweb/OVCSWLocalizacionRC/OVCCallejero.asmx/Consulta_DNPRC";
 
-    const response = await axios.get(url, {
-      timeout: 15000
+    const r = await axios.get(url, {
+      timeout: 20000,
+      params: {
+        RefCat: rc
+      }
     });
 
-    const parsed = await parseXML(response.data);
+    const parsed = await xml2js.parseStringPromise(r.data, {
+      explicitArray: false,
+      mergeAttrs: true
+    });
 
-    result.tests.catastro = {
-      status: "OK",
-      refcat,
+    ok(res, {
       fuente: "Dirección General del Catastro",
-      parsed: !!parsed
-    };
-
-  } catch (error) {
-
-    result.tests.catastro = {
-      status: "ERROR",
-      error: error.message
-    };
-  }
-
-  // ====================================================
-  // 2. TEST OPEN-METEO GEOCODING
-  // ====================================================
-
-  try {
-
-    const geoURL =
-      "https://geocoding-api.open-meteo.com/v1/search?name=Plasencia&count=1&language=es&format=json";
-
-    const geo = await axios.get(geoURL, {
-      timeout: 15000
+      referencia_catastral: rc,
+      catastro: parsed
     });
-
-    const item = geo.data.results?.[0];
-
-    result.tests.openMeteoGeocoding = {
-      status: "OK",
-      municipio: item?.name,
-      lat: item?.latitude,
-      lon: item?.longitude
-    };
-
-  } catch (error) {
-
-    result.tests.openMeteoGeocoding = {
-      status: "ERROR",
-      error: error.message
-    };
+  } catch (e) {
+    error(res, "Dirección General del Catastro", e.message);
   }
-
-  // ====================================================
-  // 3. TEST OPEN-METEO ENTORNO
-  // ====================================================
-
-  try {
-
-    const lat = 40.0312;
-    const lon = -6.0885;
-
-    const meteoURL =
-      `https://air-quality-api.open-meteo.com/v1/air-quality?latitude=${lat}&longitude=${lon}&current=pm10,pm2_5,nitrogen_dioxide,ozone,uv_index`;
-
-    const meteo = await axios.get(meteoURL, {
-      timeout: 15000
-    });
-
-    result.tests.openMeteoAir = {
-      status: "OK",
-      data: meteo.data.current || null
-    };
-
-  } catch (error) {
-
-    result.tests.openMeteoAir = {
-      status: "ERROR",
-      error: error.message
-    };
-  }
-
-  // ====================================================
-  // 4. TEST BANCO DE ESPAÑA
-  // ====================================================
-
-  try {
-
-    const csvURL =
-      "https://www.bde.es/webbe/es/estadisticas/compartido/datos/csv/ti_1_7.csv";
-
-    const csv = await axios.get(csvURL, {
-      timeout: 15000
-    });
-
-    const text = csv.data;
-
-    const containsEuribor =
-      text.toLowerCase().includes("eur");
-
-    result.tests.bancoEspana = {
-      status: "OK",
-      fuente: "Banco de España CSV oficial",
-      contieneEuribor: containsEuribor,
-      longitudCSV: text.length
-    };
-
-  } catch (error) {
-
-    result.tests.bancoEspana = {
-      status: "ERROR",
-      error: error.message
-    };
-  }
-
-  // ====================================================
-  // 5. TEST INE
-  // ====================================================
-
-  try {
-
-    const ineURL =
-      "https://servicios.ine.es/wstempus/js/es/DATOS_TABLA/30896?tip=AM";
-
-    const ine = await axios.get(ineURL, {
-      timeout: 20000
-    });
-
-    const data = ine.data;
-
-    result.tests.ine = {
-      status: "OK",
-      registros: Array.isArray(data) ? data.length : 0,
-      fuente: "INE WSTempus Tabla 30896"
-    };
-
-  } catch (error) {
-
-    result.tests.ine = {
-      status: "ERROR",
-      error: error.message
-    };
-  }
-
-  // ====================================================
-
-  res.json(result);
-
 });
 
-// ======================================================
-// TEST SIMPLE
-// ======================================================
+app.get("/api/test/all", async (_, res) => {
+  const tests = {};
 
-app.get("/", (req, res) => {
+  try {
+    const geo = await geocode("Plasencia");
+    tests.geocode = { status: "OK", data: geo };
+  } catch (e) {
+    tests.geocode = { status: "ERROR", mensaje: e.message };
+  }
 
-  res.send(`
-    <h1>Servidor operativo</h1>
-    <p>Punto de Control · InmoRecursos</p>
-    <a href="/api/test/all">PROBAR FUENTES</a>
-  `);
+  try {
+    const meteo = await openMeteo(40.0312, -6.0885);
+    tests.openmeteo = { status: "OK", data: meteo };
+  } catch (e) {
+    tests.openmeteo = { status: "ERROR", mensaje: e.message };
+  }
 
+  try {
+    const url =
+      "https://ovc.catastro.meh.es/ovcservweb/OVCSWLocalizacionRC/OVCCallejero.asmx/Consulta_DNPRC";
+
+    const r = await axios.get(url, {
+      timeout: 20000,
+      params: {
+        RefCat: "1481301QE2318S0001WK"
+      }
+    });
+
+    const parsed = await xml2js.parseStringPromise(r.data, {
+      explicitArray: false,
+      mergeAttrs: true
+    });
+
+    tests.catastro = {
+      status: "OK",
+      parsed: Boolean(parsed)
+    };
+  } catch (e) {
+    tests.catastro = {
+      status: "ERROR",
+      mensaje: e.message
+    };
+  }
+
+  ok(res, {
+    tests
+  });
 });
-
-// ======================================================
 
 app.listen(PORT, () => {
-  console.log("====================================");
-  console.log("SERVIDOR INICIADO");
-  console.log("Puerto:", PORT);
-  console.log("====================================");
+  console.log(`Servidor Punto de Control activo en puerto ${PORT}`);
 });
