@@ -31,30 +31,42 @@ function toNumber(v) {
   return Number.isFinite(n) ? n : null;
 }
 
+/* GEOCODING ESPAÑA */
 async function geocode(direccion) {
   const r = await axios.get("https://geocoding-api.open-meteo.com/v1/search", {
     timeout: 15000,
     params: {
       name: direccion,
-      count: 1,
+      count: 10,
       language: "es",
-      format: "json"
+      format: "json",
+      countryCode: "ES"
     }
   });
 
-  const item = r.data?.results?.[0];
-  if (!item) throw new Error("No se pudo localizar la dirección o municipio");
+  const results = r.data?.results || [];
+
+  const item =
+    results.find(x => String(x.country_code || "").toUpperCase() === "ES") ||
+    results.find(x => String(x.country || "").toLowerCase().includes("espa")) ||
+    results[0];
+
+  if (!item) {
+    throw new Error("No se pudo localizar la dirección o municipio en España");
+  }
 
   return {
     lat: item.latitude,
     lon: item.longitude,
-    municipio: item.name,
+    municipio: item.name || "",
     provincia: item.admin2 || "",
     comunidad: item.admin1 || "",
-    pais: item.country || ""
+    pais: item.country || "",
+    country_code: item.country_code || ""
   };
 }
 
+/* OPEN METEO */
 async function openMeteo(lat, lon) {
   const [air, weather] = await Promise.all([
     axios.get("https://air-quality-api.open-meteo.com/v1/air-quality", {
@@ -110,30 +122,36 @@ function scoreAire(aire) {
   return Math.max(0, Math.min(100, Math.round(score)));
 }
 
+/* HOME */
 app.get("/", (_, res) => {
   ok(res, {
     servicio: "InmoRecursos · Punto de Control de Compra",
     endpoints: [
       "/health",
-      "/api/test/all",
+      "/api/test/all?rc=REFERENCIA_CATASTRAL_REAL",
       "/api/geocode?direccion=Plasencia",
       "/api/openmeteo?lat=40.0312&lon=-6.0885",
       "/api/entorno?direccion=Plasencia",
-      "/api/catastro?rc=REFERENCIA_CATASTRAL"
+      "/api/catastro?rc=REFERENCIA_CATASTRAL_REAL"
     ]
   });
 });
 
+/* HEALTH */
 app.get("/health", (_, res) => {
   ok(res, {
     estado: "Servidor activo"
   });
 });
 
+/* GEOCODE */
 app.get("/api/geocode", async (req, res) => {
   try {
     const direccion = req.query.direccion;
-    if (!direccion) throw new Error("Falta el parámetro direccion");
+
+    if (!direccion) {
+      throw new Error("Falta el parámetro direccion");
+    }
 
     const data = await geocode(direccion);
 
@@ -141,11 +159,13 @@ app.get("/api/geocode", async (req, res) => {
       fuente: "Open-Meteo Geocoding",
       geocoding: data
     });
+
   } catch (e) {
     error(res, "Open-Meteo Geocoding", e.message);
   }
 });
 
+/* OPENMETEO DIRECTO */
 app.get("/api/openmeteo", async (req, res) => {
   try {
     const lat = Number(req.query.lat);
@@ -170,22 +190,27 @@ app.get("/api/openmeteo", async (req, res) => {
               : "Entorno ambiental condicionante"
       }
     });
+
   } catch (e) {
     error(res, "Open-Meteo", e.message);
   }
 });
 
+/* ENTORNO POR DIRECCIÓN */
 app.get("/api/entorno", async (req, res) => {
   try {
     const direccion = req.query.direccion;
-    if (!direccion) throw new Error("Falta el parámetro direccion");
+
+    if (!direccion) {
+      throw new Error("Falta el parámetro direccion");
+    }
 
     const geo = await geocode(direccion);
     const meteo = await openMeteo(geo.lat, geo.lon);
     const puntuacion = scoreAire(meteo.aire);
 
     ok(res, {
-      fuente: "Open-Meteo Geocoding + Open-Meteo",
+      fuente: "Open-Meteo Geocoding España + Open-Meteo",
       direccion_solicitada: direccion,
       geocoding: geo,
       aire: meteo.aire,
@@ -200,15 +225,20 @@ app.get("/api/entorno", async (req, res) => {
               : "Entorno ambiental condicionante"
       }
     });
+
   } catch (e) {
     error(res, "Entorno", e.message);
   }
 });
 
+/* CATASTRO */
 app.get("/api/catastro", async (req, res) => {
   try {
     const rc = req.query.rc;
-    if (!rc) throw new Error("Falta la referencia catastral");
+
+    if (!rc) {
+      throw new Error("Falta la referencia catastral");
+    }
 
     const url =
       "https://ovc.catastro.meh.es/ovcservweb/OVCSWLocalizacionRC/OVCCallejero.asmx/Consulta_DNPRC";
@@ -230,48 +260,73 @@ app.get("/api/catastro", async (req, res) => {
       referencia_catastral: rc,
       catastro: parsed
     });
+
   } catch (e) {
     error(res, "Dirección General del Catastro", e.message);
   }
 });
 
-app.get("/api/test/all", async (_, res) => {
+/* TEST GENERAL */
+app.get("/api/test/all", async (req, res) => {
   const tests = {};
 
   try {
     const geo = await geocode("Plasencia");
-    tests.geocode = { status: "OK", data: geo };
+    tests.geocode = {
+      status: "OK",
+      data: geo
+    };
   } catch (e) {
-    tests.geocode = { status: "ERROR", mensaje: e.message };
+    tests.geocode = {
+      status: "ERROR",
+      mensaje: e.message
+    };
   }
 
   try {
     const meteo = await openMeteo(40.0312, -6.0885);
-    tests.openmeteo = { status: "OK", data: meteo };
+    tests.openmeteo = {
+      status: "OK",
+      data: meteo
+    };
   } catch (e) {
-    tests.openmeteo = { status: "ERROR", mensaje: e.message };
+    tests.openmeteo = {
+      status: "ERROR",
+      mensaje: e.message
+    };
   }
 
   try {
-    const url =
-      "https://ovc.catastro.meh.es/ovcservweb/OVCSWLocalizacionRC/OVCCallejero.asmx/Consulta_DNPRC";
+    const refcat = req.query.rc;
 
-    const r = await axios.get(url, {
-      timeout: 20000,
-      params: {
-        RefCat: "1481301QE2318S0001WK"
-      }
-    });
+    if (!refcat) {
+      tests.catastro = {
+        status: "ERROR",
+        mensaje: "Para probar Catastro use /api/test/all?rc=SU_REFERENCIA_CATASTRAL_REAL"
+      };
+    } else {
+      const url =
+        "https://ovc.catastro.meh.es/ovcservweb/OVCSWLocalizacionRC/OVCCallejero.asmx/Consulta_DNPRC";
 
-    const parsed = await xml2js.parseStringPromise(r.data, {
-      explicitArray: false,
-      mergeAttrs: true
-    });
+      const r = await axios.get(url, {
+        timeout: 20000,
+        params: {
+          RefCat: refcat
+        }
+      });
 
-    tests.catastro = {
-      status: "OK",
-      parsed: Boolean(parsed)
-    };
+      const parsed = await xml2js.parseStringPromise(r.data, {
+        explicitArray: false,
+        mergeAttrs: true
+      });
+
+      tests.catastro = {
+        status: "OK",
+        refcat,
+        parsed: Boolean(parsed)
+      };
+    }
+
   } catch (e) {
     tests.catastro = {
       status: "ERROR",
@@ -284,6 +339,7 @@ app.get("/api/test/all", async (_, res) => {
   });
 });
 
+/* START */
 app.listen(PORT, () => {
   console.log(`Servidor Punto de Control activo en puerto ${PORT}`);
 });
