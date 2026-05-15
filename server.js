@@ -36,7 +36,10 @@ function toNumber(v) {
 }
 
 async function parseXML(xml) {
-  return await xml2js.parseStringPromise(xml, { explicitArray: false, mergeAttrs: true });
+  return await xml2js.parseStringPromise(xml, {
+    explicitArray: false,
+    mergeAttrs: true
+  });
 }
 
 /* =========================
@@ -46,10 +49,19 @@ async function parseXML(xml) {
 async function geocode(direccion) {
   const r = await axios.get("https://geocoding-api.open-meteo.com/v1/search", {
     timeout: 15000,
-    params: { name: direccion, count: 10, language: "es", format: "json", countryCode: "ES" }
+    params: {
+      name: direccion,
+      count: 10,
+      language: "es",
+      format: "json",
+      countryCode: "ES"
+    }
   });
 
-  const item = (r.data?.results || []).find(x => String(x.country_code || "").toUpperCase() === "ES") || r.data?.results?.[0];
+  const item =
+    (r.data?.results || []).find(x => String(x.country_code || "").toUpperCase() === "ES") ||
+    r.data?.results?.[0];
+
   if (!item) throw new Error("No se pudo localizar la dirección o municipio en España");
 
   return {
@@ -108,11 +120,13 @@ async function openMeteo(lat, lon) {
 
 function scoreAire(aire) {
   let score = 100;
+
   if (aire.pm25 !== null) score -= aire.pm25 > 25 ? 28 : aire.pm25 > 10 ? 12 : 0;
   if (aire.pm10 !== null) score -= aire.pm10 > 40 ? 20 : aire.pm10 > 20 ? 8 : 0;
   if (aire.no2 !== null) score -= aire.no2 > 40 ? 20 : aire.no2 > 20 ? 8 : 0;
   if (aire.ozono !== null) score -= aire.ozono > 120 ? 14 : aire.ozono > 100 ? 6 : 0;
   if (aire.aqi_europeo !== null) score -= aire.aqi_europeo > 50 ? 20 : aire.aqi_europeo > 20 ? 8 : 0;
+
   return Math.max(0, Math.min(100, Math.round(score)));
 }
 
@@ -133,7 +147,10 @@ async function intentoCatastro(nombre, url, params) {
     });
 
     let parsed = null;
-    try { parsed = await parseXML(r.data); } catch {}
+
+    try {
+      parsed = await parseXML(r.data);
+    } catch {}
 
     return {
       nombre,
@@ -145,7 +162,12 @@ async function intentoCatastro(nombre, url, params) {
       raw: parsed
     };
   } catch (e) {
-    return { nombre, ok: false, error: e.message, params };
+    return {
+      nombre,
+      ok: false,
+      error: e.message,
+      params
+    };
   }
 }
 
@@ -253,7 +275,11 @@ function parseBdeCSV(text) {
 
 async function bdeEuribor() {
   const url = "https://www.bde.es/webbe/es/estadisticas/compartido/datos/csv/ti_1_7.csv";
-  const r = await axios.get(url, { timeout: 30000, responseType: "text" });
+  const r = await axios.get(url, {
+    timeout: 30000,
+    responseType: "text"
+  });
+
   return parseBdeCSV(r.data);
 }
 
@@ -263,7 +289,10 @@ async function bdeEuribor() {
 
 async function mivauTest() {
   const url = "https://apps.fomento.gob.es/boletinonline2/?nivel=2&orden=35000000";
-  const r = await axios.get(url, { timeout: 30000, responseType: "text" });
+  const r = await axios.get(url, {
+    timeout: 30000,
+    responseType: "text"
+  });
 
   const text = String(r.data);
 
@@ -273,7 +302,9 @@ async function mivauTest() {
     acceso: true,
     longitud_html: text.length,
     contiene_valor_tasado: limpiarTexto(text).includes("valor tasado"),
-    contiene_municipios_25000: limpiarTexto(text).includes("25.000") || limpiarTexto(text).includes("25000"),
+    contiene_municipios_25000:
+      limpiarTexto(text).includes("25.000") ||
+      limpiarTexto(text).includes("25000"),
     aviso: "MIVAU responde con página/boletín. Siguiente fase: localizar enlace CSV/XLS estable y parsear valor tasado por municipio."
   };
 }
@@ -292,6 +323,9 @@ app.get("/", (_, res) => {
       "/api/ine-renta?municipio=Plasencia",
       "/api/bde/euribor",
       "/api/mivau/test",
+      "/api/ine/debug/tabla-30896",
+      "/api/bde/debug/ti-1-7",
+      "/api/mivau/debug",
       "/api/geocode?direccion=Plasencia",
       "/api/entorno?direccion=Plasencia",
       "/api/catastro-test?rc=REFERENCIA"
@@ -299,31 +333,61 @@ app.get("/", (_, res) => {
   });
 });
 
-app.get("/health", (_, res) => ok(res, { estado: "Servidor activo", fase: "2-oficiales" }));
+app.get("/health", (_, res) => {
+  ok(res, {
+    estado: "Servidor activo",
+    fase: "2-oficiales-debug"
+  });
+});
+
+/* =========================
+   ENDPOINTS ENTORNO
+========================= */
 
 app.get("/api/geocode", async (req, res) => {
   try {
     if (!req.query.direccion) throw new Error("Falta el parámetro direccion");
-    ok(res, { fuente: "Open-Meteo Geocoding", geocoding: await geocode(req.query.direccion) });
-  } catch (e) { error(res, "Open-Meteo Geocoding", e.message); }
+
+    ok(res, {
+      fuente: "Open-Meteo Geocoding",
+      geocoding: await geocode(req.query.direccion)
+    });
+  } catch (e) {
+    error(res, "Open-Meteo Geocoding", e.message);
+  }
 });
 
 app.get("/api/openmeteo", async (req, res) => {
   try {
-    const lat = Number(req.query.lat), lon = Number(req.query.lon);
-    if (!Number.isFinite(lat) || !Number.isFinite(lon)) throw new Error("Faltan coordenadas válidas");
+    const lat = Number(req.query.lat);
+    const lon = Number(req.query.lon);
+
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+      throw new Error("Faltan coordenadas válidas");
+    }
+
     const data = await openMeteo(lat, lon);
     const puntuacion = scoreAire(data.aire);
-    ok(res, { ...data, lectura_entorno: { puntuacion_aire: puntuacion } });
-  } catch (e) { error(res, "Open-Meteo", e.message); }
+
+    ok(res, {
+      ...data,
+      lectura_entorno: {
+        puntuacion_aire: puntuacion
+      }
+    });
+  } catch (e) {
+    error(res, "Open-Meteo", e.message);
+  }
 });
 
 app.get("/api/entorno", async (req, res) => {
   try {
     if (!req.query.direccion) throw new Error("Falta el parámetro direccion");
+
     const geo = await geocode(req.query.direccion);
     const meteo = await openMeteo(geo.lat, geo.lon);
     const puntuacion = scoreAire(meteo.aire);
+
     ok(res, {
       fuente: "Open-Meteo Geocoding España + Open-Meteo",
       direccion_solicitada: req.query.direccion,
@@ -332,22 +396,40 @@ app.get("/api/entorno", async (req, res) => {
       meteo: meteo.meteo,
       lectura_entorno: {
         puntuacion_aire: puntuacion,
-        lectura: puntuacion >= 70 ? "Entorno ambiental favorable" : puntuacion >= 45 ? "Entorno ambiental funcional" : "Entorno ambiental condicionante"
+        lectura:
+          puntuacion >= 70
+            ? "Entorno ambiental favorable"
+            : puntuacion >= 45
+              ? "Entorno ambiental funcional"
+              : "Entorno ambiental condicionante"
       }
     });
-  } catch (e) { error(res, "Entorno", e.message); }
+  } catch (e) {
+    error(res, "Entorno", e.message);
+  }
 });
+
+/* =========================
+   ENDPOINTS CATASTRO
+========================= */
 
 app.get("/api/catastro-test", async (req, res) => {
   try {
     if (!req.query.rc) throw new Error("Falta la referencia catastral");
-    ok(res, { fuente: "Diagnóstico Catastro", catastro_test: await diagnosticarCatastro(req.query.rc) });
-  } catch (e) { error(res, "Diagnóstico Catastro", e.message); }
+
+    ok(res, {
+      fuente: "Diagnóstico Catastro",
+      catastro_test: await diagnosticarCatastro(req.query.rc)
+    });
+  } catch (e) {
+    error(res, "Diagnóstico Catastro", e.message);
+  }
 });
 
 app.get("/api/catastro", async (req, res) => {
   try {
     if (!req.query.rc) throw new Error("Falta la referencia catastral");
+
     const data = await diagnosticarCatastro(req.query.rc);
 
     if (!data.exito) {
@@ -367,63 +449,207 @@ app.get("/api/catastro", async (req, res) => {
       catastro: data.resultado_valido.raw,
       catastro_test: data
     });
-  } catch (e) { error(res, "Dirección General del Catastro", e.message); }
+  } catch (e) {
+    error(res, "Dirección General del Catastro", e.message);
+  }
 });
 
 /* =========================
-   NUEVOS ENDPOINTS FASE 2
+   ENDPOINTS OFICIALES FASE 2
 ========================= */
 
 app.get("/api/ine-renta", async (req, res) => {
   try {
     const municipio = req.query.municipio;
     if (!municipio) throw new Error("Falta el parámetro municipio");
+
     ok(res, await ineRenta(municipio));
-  } catch (e) { error(res, "INE renta · Tabla 30896", e.message); }
+  } catch (e) {
+    error(res, "INE renta · Tabla 30896", e.message);
+  }
 });
 
 app.get("/api/bde/euribor", async (_, res) => {
   try {
     ok(res, await bdeEuribor());
-  } catch (e) { error(res, "Banco de España · Euríbor", e.message); }
+  } catch (e) {
+    error(res, "Banco de España · Euríbor", e.message);
+  }
 });
 
 app.get("/api/mivau/test", async (_, res) => {
   try {
     ok(res, await mivauTest());
-  } catch (e) { error(res, "MIVAU · Valor tasado", e.message); }
+  } catch (e) {
+    error(res, "MIVAU · Valor tasado", e.message);
+  }
 });
+
+/* =========================
+   DEBUG · INE TABLA 30896
+========================= */
+
+app.get("/api/ine/debug/tabla-30896", async (_, res) => {
+  try {
+    const url = "https://servicios.ine.es/wstempus/js/es/DATOS_TABLA/30896?nult=1";
+
+    const r = await axios.get(url, { timeout: 30000 });
+    const data = Array.isArray(r.data) ? r.data : [];
+
+    const muestra = data.slice(0, 5);
+    const claves = muestra.length ? Object.keys(muestra[0]) : [];
+
+    ok(res, {
+      fuente: "INE WSTempus Tabla 30896",
+      registros_totales: data.length,
+      claves_detectadas: claves,
+      muestra
+    });
+  } catch (e) {
+    error(res, "INE", e.message);
+  }
+});
+
+/* =========================
+   DEBUG · BANCO DE ESPAÑA
+========================= */
+
+app.get("/api/bde/debug/ti-1-7", async (_, res) => {
+  try {
+    const url = "https://www.bde.es/webbe/es/estadisticas/compartido/datos/csv/ti_1_7.csv";
+
+    const r = await axios.get(url, {
+      timeout: 30000,
+      responseType: "text"
+    });
+
+    const text = String(r.data);
+    const lines = text.split(/\r?\n/).filter(Boolean);
+
+    ok(res, {
+      fuente: "Banco de España CSV TI_1_7",
+      total_lineas: lines.length,
+      primeras_lineas: lines.slice(0, 20)
+    });
+  } catch (e) {
+    error(res, "Banco de España", e.message);
+  }
+});
+
+/* =========================
+   DEBUG · MIVAU
+========================= */
+
+app.get("/api/mivau/debug", async (_, res) => {
+  try {
+    const url = "https://apps.fomento.gob.es/boletinonline2/?nivel=2&orden=35000000";
+
+    const r = await axios.get(url, {
+      timeout: 30000,
+      responseType: "text"
+    });
+
+    const html = String(r.data);
+
+    const enlaces = [...html.matchAll(/href="([^"]+)"/gi)].map(x => x[1]);
+
+    ok(res, {
+      fuente: "MIVAU",
+      longitud_html: html.length,
+      total_enlaces: enlaces.length,
+      primeros_enlaces: enlaces.slice(0, 30)
+    });
+  } catch (e) {
+    error(res, "MIVAU", e.message);
+  }
+});
+
+/* =========================
+   TESTS
+========================= */
 
 app.get("/api/test/oficiales", async (req, res) => {
   const municipio = req.query.municipio || "Plasencia";
   const tests = {};
 
-  try { tests.ine_renta = { status: "OK", data: await ineRenta(municipio) }; }
-  catch (e) { tests.ine_renta = { status: "ERROR", mensaje: e.message }; }
+  try {
+    tests.ine_renta = {
+      status: "OK",
+      data: await ineRenta(municipio)
+    };
+  } catch (e) {
+    tests.ine_renta = {
+      status: "ERROR",
+      mensaje: e.message
+    };
+  }
 
-  try { tests.banco_espana = { status: "OK", data: await bdeEuribor() }; }
-  catch (e) { tests.banco_espana = { status: "ERROR", mensaje: e.message }; }
+  try {
+    tests.banco_espana = {
+      status: "OK",
+      data: await bdeEuribor()
+    };
+  } catch (e) {
+    tests.banco_espana = {
+      status: "ERROR",
+      mensaje: e.message
+    };
+  }
 
-  try { tests.mivau = { status: "OK", data: await mivauTest() }; }
-  catch (e) { tests.mivau = { status: "ERROR", mensaje: e.message }; }
+  try {
+    tests.mivau = {
+      status: "OK",
+      data: await mivauTest()
+    };
+  } catch (e) {
+    tests.mivau = {
+      status: "ERROR",
+      mensaje: e.message
+    };
+  }
 
-  ok(res, { municipio, tests });
+  ok(res, {
+    municipio,
+    tests
+  });
 });
 
 app.get("/api/test/all", async (req, res) => {
   const tests = {};
 
-  try { tests.geocode = { status: "OK", data: await geocode("Plasencia") }; }
-  catch (e) { tests.geocode = { status: "ERROR", mensaje: e.message }; }
+  try {
+    tests.geocode = {
+      status: "OK",
+      data: await geocode("Plasencia")
+    };
+  } catch (e) {
+    tests.geocode = {
+      status: "ERROR",
+      mensaje: e.message
+    };
+  }
 
-  try { tests.openmeteo = { status: "OK", data: await openMeteo(40.0312, -6.0885) }; }
-  catch (e) { tests.openmeteo = { status: "ERROR", mensaje: e.message }; }
+  try {
+    tests.openmeteo = {
+      status: "OK",
+      data: await openMeteo(40.0312, -6.0885)
+    };
+  } catch (e) {
+    tests.openmeteo = {
+      status: "ERROR",
+      mensaje: e.message
+    };
+  }
 
   try {
     if (!req.query.rc) {
-      tests.catastro = { status: "ERROR", mensaje: "Para probar Catastro use /api/test/all?rc=SU_REFERENCIA_CATASTRAL_REAL" };
+      tests.catastro = {
+        status: "ERROR",
+        mensaje: "Para probar Catastro use /api/test/all?rc=SU_REFERENCIA_CATASTRAL_REAL"
+      };
     } else {
       const data = await diagnosticarCatastro(req.query.rc);
+
       tests.catastro = {
         status: data.exito ? "OK" : "ERROR",
         endpoint_valido: data.endpoint_valido,
@@ -432,19 +658,57 @@ app.get("/api/test/all", async (req, res) => {
         intentos: data.intentos
       };
     }
-  } catch (e) { tests.catastro = { status: "ERROR", mensaje: e.message }; }
+  } catch (e) {
+    tests.catastro = {
+      status: "ERROR",
+      mensaje: e.message
+    };
+  }
 
-  try { tests.ine_renta = { status: "OK", data: await ineRenta("Plasencia") }; }
-  catch (e) { tests.ine_renta = { status: "ERROR", mensaje: e.message }; }
+  try {
+    tests.ine_renta = {
+      status: "OK",
+      data: await ineRenta("Plasencia")
+    };
+  } catch (e) {
+    tests.ine_renta = {
+      status: "ERROR",
+      mensaje: e.message
+    };
+  }
 
-  try { tests.banco_espana = { status: "OK", data: await bdeEuribor() }; }
-  catch (e) { tests.banco_espana = { status: "ERROR", mensaje: e.message }; }
+  try {
+    tests.banco_espana = {
+      status: "OK",
+      data: await bdeEuribor()
+    };
+  } catch (e) {
+    tests.banco_espana = {
+      status: "ERROR",
+      mensaje: e.message
+    };
+  }
 
-  try { tests.mivau = { status: "OK", data: await mivauTest() }; }
-  catch (e) { tests.mivau = { status: "ERROR", mensaje: e.message }; }
+  try {
+    tests.mivau = {
+      status: "OK",
+      data: await mivauTest()
+    };
+  } catch (e) {
+    tests.mivau = {
+      status: "ERROR",
+      mensaje: e.message
+    };
+  }
 
-  ok(res, { tests });
+  ok(res, {
+    tests
+  });
 });
+
+/* =========================
+   START
+========================= */
 
 app.listen(PORT, () => {
   console.log(`Servidor Punto de Control Fase 2 activo en puerto ${PORT}`);
