@@ -81,6 +81,7 @@ function semaforoMenor(valor, verdeMax, naranjaMax) {
   }
 
   const n = Number(valor);
+
   if (n <= verdeMax) return { color: "verde", nivel: "Óptimo" };
   if (n <= naranjaMax) return { color: "naranja", nivel: "Precaución" };
   return { color: "rojo", nivel: "Negativo" };
@@ -92,6 +93,7 @@ function semaforoMayor(valor, verdeMin, naranjaMin) {
   }
 
   const n = Number(valor);
+
   if (n > verdeMin) return { color: "verde", nivel: "Favorable" };
   if (n >= naranjaMin) return { color: "naranja", nivel: "Precaución" };
   return { color: "rojo", nivel: "Negativo" };
@@ -434,7 +436,8 @@ app.get("/api/ine/ipc", async (req, res) => {
 
 /* =========================================================
    INE · PIB
-   Render: INE_PIB_TABLA=3156
+   Render: INE_PIB_TABLA=67295
+   Calcula variación anual desde valores absolutos.
 ========================================================= */
 
 app.get("/api/ine/pib", async (req, res) => {
@@ -450,44 +453,60 @@ app.get("/api/ine/pib", async (req, res) => {
       }));
     }
 
-    const data = await ineTablaJson(tabla, 1);
+    const data = await ineTablaJson(tabla, 2);
     const rows = Array.isArray(data) ? data : [];
 
     const candidato =
-      elegirSerie(rows, ["producto interior bruto", "variacion anual"]) ||
-      elegirSerie(rows, ["producto interior bruto"]) ||
-      elegirSerie(rows, ["pib", "variacion anual"]) ||
-      elegirSerie(rows, ["pib"]) ||
-      rows[0];
+      elegirSerie(rows, ["producto interior bruto", "precios de mercado", "valor"]) ||
+      elegirSerie(rows, ["producto interior bruto", "valor"]) ||
+      elegirSerie(rows, ["pib", "valor"]);
 
-    if (!candidato || !candidato.Data?.length) {
+    if (!candidato || !candidato.Data?.length || candidato.Data.length < 2) {
       return res.json(ok({
         fuente: `INE WSTempus · Tabla ${tabla}`,
         estado_dato: "NO_DISPONIBLE",
         aviso:
-          "INE respondió, pero no se localizó una serie PIB consolidable."
+          "INE respondió, pero no se localizaron dos valores absolutos consecutivos de PIB para calcular variación anual."
       }));
     }
 
-    const dato = getLastDato(candidato);
-    const valor = toNumber(dato.Valor);
+    const actual = candidato.Data[0];
+    const anterior = candidato.Data[1];
+
+    const valorActual = toNumber(actual.Valor);
+    const valorAnterior = toNumber(anterior.Valor);
+
+    const variacionAnual =
+      valorActual !== null && valorAnterior
+        ? ((valorActual - valorAnterior) / valorAnterior) * 100
+        : null;
 
     res.json(ok({
       fuente: `INE WSTempus · Tabla ${tabla}`,
-      estado_dato: "OK",
+      estado_dato: variacionAnual === null ? "NO_DISPONIBLE" : "OK",
       indicador: candidato.Nombre,
-      fecha: dato.Anyo,
-      periodo: dato.FK_Periodo,
-      valor,
-      semaforo: semaforoMayor(valor, 2, 0),
+      fecha_actual: actual.Anyo,
+      periodo_actual: actual.FK_Periodo,
+      fecha_anterior: anterior.Anyo,
+      periodo_anterior: anterior.FK_Periodo,
+      valor_absoluto_actual: valorActual,
+      valor_absoluto_anterior: valorAnterior,
+      variacion_anual: variacionAnual,
+      valor: variacionAnual,
+      semaforo:
+        variacionAnual === null
+          ? { color: "gris", nivel: "No disponible" }
+          : semaforoMayor(variacionAnual, 2, 0),
       interpretacion:
-        valor > 2
+        variacionAnual === null
+          ? "No se puede calcular la variación anual del PIB."
+          : variacionAnual > 2
           ? "Economía expansiva."
-          : valor >= 0
+          : variacionAnual >= 0
           ? "Crecimiento moderado."
           : "Entorno de desaceleración o contracción.",
       aviso:
-        "Dato PIB obtenido desde INE según tabla configurada."
+        "PIB calculado como variación anual a partir de valores absolutos consecutivos de la tabla configurada. El semáforo se aplica a la variación anual, no al valor absoluto."
     }));
   } catch (e) {
     res.json(fail("No se pudo obtener PIB INE.", {
@@ -579,6 +598,7 @@ app.get("/api/ine/paro", async (req, res) => {
 /* =========================================================
    INE · SALARIOS
    Render: INE_SALARIOS_TABLA=10882
+   Prioriza: salario medio bruto · ambos sexos · España.
 ========================================================= */
 
 app.get("/api/ine/salarios", async (req, res) => {
@@ -598,9 +618,12 @@ app.get("/api/ine/salarios", async (req, res) => {
     const rows = Array.isArray(data) ? data : [];
 
     const candidato =
-      elegirSerie(rows, ["ganancia media"]) ||
+      elegirSerie(rows, ["salario medio bruto", "ambos sexos", "espana"]) ||
+      elegirSerie(rows, ["salario medio bruto", "ambos sexos"]) ||
+      elegirSerie(rows, ["ganancia media", "ambos sexos"]) ||
+      elegirSerie(rows, ["salario medio", "ambos sexos"]) ||
+      elegirSerie(rows, ["salario medio bruto"]) ||
       elegirSerie(rows, ["salario medio"]) ||
-      elegirSerie(rows, ["salario"]) ||
       rows[0];
 
     if (!candidato || !candidato.Data?.length) {
@@ -623,9 +646,9 @@ app.get("/api/ine/salarios", async (req, res) => {
       periodo: dato.FK_Periodo,
       valor,
       interpretacion:
-        "El salario medio sirve como referencia comparativa del esfuerzo económico y nivel adquisitivo.",
+        "El salario medio bruto sirve como referencia comparativa del esfuerzo económico y nivel adquisitivo.",
       aviso:
-        "Dato salarial obtenido desde INE según tabla configurada."
+        "Dato salarial obtenido desde INE priorizando salario medio bruto, ambos sexos y España."
     }));
   } catch (e) {
     res.json(fail("No se pudo obtener salarios INE.", {
@@ -637,6 +660,7 @@ app.get("/api/ine/salarios", async (req, res) => {
 /* =========================================================
    CIS · ICC
    Render: CIS_ICC_ESTUDIO=3549
+   Si devuelve 410 u otro error, no rompe el sistema.
 ========================================================= */
 
 app.get("/api/cis/icc", async (req, res) => {
@@ -686,7 +710,16 @@ app.get("/api/cis/icc", async (req, res) => {
         "Dato ICC interpretado desde estudio CIS configurado. Debe comprobarse que el documento mantiene la estructura esperada."
     }));
   } catch (e) {
-    res.json(fail("No se pudo obtener ICC del CIS.", {
+    res.json(ok({
+      fuente: "CIS · Índice de Confianza del Consumidor",
+      estado_dato: "NO_DISPONIBLE",
+      estudio: process.env.CIS_ICC_ESTUDIO || null,
+      valor: null,
+      semaforo: null,
+      interpretacion:
+        "No se ha podido obtener un dato ICC consolidado desde el CIS.",
+      aviso:
+        "El CIS no devuelve actualmente un recurso estable para este estudio o la URL configurada no está disponible. El dato no entra en la macrodecisión.",
       detalle: e.message
     }));
   }
@@ -750,44 +783,49 @@ app.get("/api/macro-decision", async (req, res) => {
 
     const indicadores = [];
 
-    function sumar(nombre, color) {
+    function sumar(nombre, endpoint, color) {
+      if (!endpoint || endpoint.estado_dato !== "OK") return;
       if (!color || color === "gris") return;
 
-      let score = 0;
-      if (color === "verde") score = 100;
-      else if (color === "naranja") score = 60;
-      else if (color === "rojo") score = 20;
+      const score = scoreColor(color);
+      if (score === null) return;
 
       indicadores.push({ nombre, color, score });
     }
 
     sumar(
       "BCE",
+      c.bce,
       c.bce?.tipos?.operaciones_principales?.semaforo?.color
     );
 
     sumar(
       "IPC",
+      c.ipc,
       c.ipc?.semaforo?.color
     );
 
     sumar(
-      "PIB",
+      "PIB variación anual",
+      c.pib,
       c.pib?.semaforo?.color
     );
 
     sumar(
       "Paro CCAA",
+      c.paro_ccaa,
       c.paro_ccaa?.semaforo?.color
     );
 
     sumar(
       "Paro provincia",
+      c.paro_provincia,
       c.paro_provincia?.semaforo?.color
     );
 
     sumar(
       "CIS",
+      c.cis,
       c.cis?.semaforo?.color
     );
 
@@ -832,7 +870,7 @@ app.get("/api/macro-decision", async (req, res) => {
       interpretacion,
       contexto: c,
       aviso:
-        "La macrodecisión interpreta únicamente datos oficiales con estado_dato OK."
+        "La macrodecisión interpreta únicamente indicadores oficiales con estado_dato OK. El PIB se usa sólo como variación anual calculada, no como valor absoluto."
     }));
   } catch (e) {
     res.json(fail("No se pudo generar macrodecisión.", {
