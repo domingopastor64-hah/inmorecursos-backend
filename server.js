@@ -11,7 +11,7 @@ app.use(express.json());
 const PORT = process.env.PORT || 3000;
 
 const http = axios.create({
-  timeout: 25000,
+  timeout: 30000,
   headers: {
     "User-Agent": "InmoRecursos-Punto-Control/1.0"
   }
@@ -23,7 +23,11 @@ const xmlParser = new XMLParser({
   textNodeName: "text"
 });
 
-function ok(data) {
+/* =========================================================
+   UTILIDADES
+========================================================= */
+
+function ok(data = {}) {
   return {
     status: "OK",
     timestamp: new Date().toISOString(),
@@ -31,7 +35,7 @@ function ok(data) {
   };
 }
 
-function error(message, extra = {}) {
+function fail(message, extra = {}) {
   return {
     status: "ERROR",
     timestamp: new Date().toISOString(),
@@ -50,12 +54,86 @@ function cleanText(v = "") {
 
 function toNumber(v) {
   if (v === null || v === undefined || v === "" || v === "nr") return null;
-  const s = String(v)
-    .replace(/\s/g, "")
-    .replace(/\./g, "")
-    .replace(",", ".");
-  const n = Number(s);
+
+  const raw = String(v).trim();
+
+  if (/^\d{1,3}(\.\d{3})*,\d+$/.test(raw)) {
+    return Number(raw.replace(/\./g, "").replace(",", "."));
+  }
+
+  if (/^\d+,\d+$/.test(raw)) {
+    return Number(raw.replace(",", "."));
+  }
+
+  const n = Number(raw.replace(/\s/g, ""));
   return Number.isFinite(n) ? n : null;
+}
+
+function normalizarTipoBCE(v) {
+  const n = toNumber(v);
+  if (n === null) return null;
+  return n > 20 ? n / 100 : n;
+}
+
+function semaforoMenor(valor, verdeMax, naranjaMax) {
+  if (valor === null || valor === undefined || !Number.isFinite(Number(valor))) {
+    return { color: "gris", nivel: "No disponible" };
+  }
+
+  const n = Number(valor);
+  if (n <= verdeMax) return { color: "verde", nivel: "Óptimo" };
+  if (n <= naranjaMax) return { color: "naranja", nivel: "Precaución" };
+  return { color: "rojo", nivel: "Negativo" };
+}
+
+function semaforoMayor(valor, verdeMin, naranjaMin) {
+  if (valor === null || valor === undefined || !Number.isFinite(Number(valor))) {
+    return { color: "gris", nivel: "No disponible" };
+  }
+
+  const n = Number(valor);
+  if (n > verdeMin) return { color: "verde", nivel: "Favorable" };
+  if (n >= naranjaMin) return { color: "naranja", nivel: "Precaución" };
+  return { color: "rojo", nivel: "Negativo" };
+}
+
+function municipioExacto(row0, municipio) {
+  const limpio = cleanText(row0 || "");
+  const buscado = cleanText(municipio);
+  const sinCodigo = limpio.replace(/^\d+\s+/, "").trim();
+
+  return (
+    sinCodigo === buscado &&
+    !sinCodigo.includes("distrito") &&
+    !sinCodigo.includes("seccion")
+  );
+}
+
+async function ineTablaJson(tabla, nult = 1) {
+  const url = `https://servicios.ine.es/wstempus/js/es/DATOS_TABLA/${tabla}`;
+  const response = await http.get(url, { params: { nult } });
+  return response.data;
+}
+
+function getLastDato(serie) {
+  if (!serie?.Data?.length) return null;
+  return serie.Data[0];
+}
+
+function elegirSerie(rows, patrones = []) {
+  if (!Array.isArray(rows)) return null;
+
+  return rows.find(r => {
+    const nombre = cleanText(r.Nombre || "");
+    return patrones.every(p => nombre.includes(cleanText(p)));
+  }) || null;
+}
+
+function scoreColor(color) {
+  if (color === "verde") return 100;
+  if (color === "naranja") return 60;
+  if (color === "rojo") return 20;
+  return null;
 }
 
 /* =========================================================
@@ -67,16 +145,22 @@ app.get("/", (req, res) => {
     estado: "Servidor activo",
     endpoints: [
       "/api/catastro?rc=",
-      "/api/ine/renta?municipio=",
+      "/api/ine/renta?municipio=Plasencia",
       "/api/bce/tipos",
       "/api/ine/ipc",
-      "/api/ine/pib"
+      "/api/ine/pib",
+      "/api/ine/paro?ambito=ccaa&nombre=Extremadura",
+      "/api/ine/paro?ambito=provincia&nombre=Cáceres",
+      "/api/ine/salarios",
+      "/api/cis/icc",
+      "/api/contexto-economico",
+      "/api/macro-decision"
     ]
   }));
 });
 
 /* =========================================================
-   CATASTRO · referencia catastral
+   CATASTRO
 ========================================================= */
 
 app.get("/api/catastro", async (req, res) => {
@@ -84,7 +168,7 @@ app.get("/api/catastro", async (req, res) => {
     const rc = String(req.query.rc || "").trim();
 
     if (!rc || rc.length < 14) {
-      return res.json(error("Referencia catastral no válida o incompleta."));
+      return res.json(fail("Referencia catastral no válida o incompleta."));
     }
 
     const rc14 = rc.slice(0, 14);
@@ -102,7 +186,6 @@ app.get("/api/catastro", async (req, res) => {
     });
 
     const parsed = xmlParser.parse(response.data);
-
     const jsonText = JSON.stringify(parsed);
 
     const superficieMatch = jsonText.match(/"sfc":\s*"?([^",}]+)"?/);
@@ -111,6 +194,7 @@ app.get("/api/catastro", async (req, res) => {
 
     res.json(ok({
       fuente: "Catastro · Consulta_DNPRC",
+      estado_dato: "OK",
       referencia_introducida: rc,
       referencia_14: rc14,
       disponible: true,
@@ -125,62 +209,50 @@ app.get("/api/catastro", async (req, res) => {
         "Catastro identifica y describe. No sustituye Registro, nota simple, urbanismo ni revisión jurídica."
     }));
   } catch (e) {
-    res.json(error("No se pudo consultar Catastro.", {
+    res.json(fail("No se pudo consultar Catastro.", {
       detalle: e.message
     }));
   }
 });
 
 /* =========================================================
-   INE RENTA · 30896 + fallback 30935 XLS
+   INE RENTA
 ========================================================= */
-
-async function ineTablaJson(tabla, nult = 1) {
-  const url = `https://servicios.ine.es/wstempus/js/es/DATOS_TABLA/${tabla}`;
-  const response = await http.get(url, {
-    params: { nult }
-  });
-  return response.data;
-}
 
 app.get("/api/ine/renta", async (req, res) => {
   try {
     const municipio = String(req.query.municipio || "").trim();
 
     if (!municipio) {
-      return res.json(error("Debe indicar municipio."));
+      return res.json(fail("Debe indicar municipio."));
     }
 
     const target = cleanText(municipio);
 
-    let tabla30896 = null;
-
     try {
-      tabla30896 = await ineTablaJson("30896", 1);
+      const tabla30896 = await ineTablaJson("30896", 1);
       const registros = Array.isArray(tabla30896) ? tabla30896 : [];
 
-      const encontrados = registros.filter(r =>
-        cleanText(r.Nombre || "").includes(target)
-      );
+      const exactos = registros.filter(r => {
+        const nombre = cleanText(r.Nombre || "");
+        const primeraParte = nombre.split(".")[0].trim();
+        return primeraParte === target;
+      });
 
-      if (encontrados.length) {
+      if (exactos.length) {
         return res.json(ok({
           fuente: "INE WSTempus · Tabla 30896",
-          municipio_buscado: municipio,
           estado_dato: "OK",
-          registros: encontrados.slice(0, 20),
+          municipio_buscado: municipio,
+          registros: exactos.slice(0, 20),
           aviso:
-            "Dato obtenido desde tabla 30896. Se devuelve selección para consolidación de indicadores."
+            "Dato obtenido desde tabla 30896 mediante coincidencia municipal exacta."
         }));
       }
     } catch {}
 
     const xlsUrl = "https://www.ine.es/jaxiT3/files/t/es/xlsx/30935.xlsx";
-
-    const xls = await http.get(xlsUrl, {
-      responseType: "arraybuffer"
-    });
-
+    const xls = await http.get(xlsUrl, { responseType: "arraybuffer" });
     const workbook = XLSX.read(xls.data, { type: "buffer" });
 
     const coincidencias = [];
@@ -193,8 +265,10 @@ app.get("/api/ine/renta", async (req, res) => {
       });
 
       rows.forEach((row, i) => {
-        const first = cleanText(row[0] || "");
-        if (first.includes(target)) {
+        const first = String(row[0] || "");
+        const limpio = cleanText(first);
+
+        if (limpio.includes(target)) {
           coincidencias.push({
             hoja: sheetName,
             fila_numero: i + 1,
@@ -204,20 +278,17 @@ app.get("/api/ine/renta", async (req, res) => {
       });
     }
 
-    const municipal = coincidencias.find(c => {
-      const first = String(c.fila[0] || "").toLowerCase();
-      return first.includes(municipio.toLowerCase()) &&
-             !first.includes("distrito") &&
-             !first.includes("seccion");
-    });
+    const municipal = coincidencias.find(c =>
+      municipioExacto(c.fila[0], municipio)
+    );
 
     if (!municipal) {
       return res.json(ok({
         fuente: "INE · Renta",
-        municipio_buscado: municipio,
         estado_dato: "NO_DISPONIBLE",
+        municipio_buscado: municipio,
         aviso:
-          "INE respondió, pero no se localizó fila municipal clara. No se inventa dato.",
+          "INE respondió, pero no se localizó fila municipal exacta. No se inventa dato.",
         coincidencias: coincidencias.slice(0, 20)
       }));
     }
@@ -226,8 +297,8 @@ app.get("/api/ine/renta", async (req, res) => {
 
     res.json(ok({
       fuente: "INE XLS · Tabla 30935",
-      municipio_buscado: municipio,
       estado_dato: "OK",
+      municipio_buscado: municipio,
       fila_municipal: row[0],
       renta: {
         renta_media_persona: toNumber(row[1]),
@@ -237,21 +308,22 @@ app.get("/api/ine/renta", async (req, res) => {
         renta_mediana_hogar: toNumber(row[37])
       },
       aviso:
-        "Dato extraído de tabla 30935. La estructura por columnas debe mantenerse bajo control al actualizar INE."
+        "Dato extraído de tabla 30935 mediante coincidencia exacta municipal."
     }));
   } catch (e) {
-    res.json(error("No se pudo obtener renta INE.", {
+    res.json(fail("No se pudo obtener renta INE.", {
       detalle: e.message
     }));
   }
 });
 
 /* =========================================================
-   BCE · tipos oficiales
+   BCE · TIPOS OFICIALES
 ========================================================= */
 
 async function ecbCsv(seriesKey) {
   const url = `https://data-api.ecb.europa.eu/service/data/FM/${seriesKey}`;
+
   const response = await http.get(url, {
     params: {
       lastNObservations: 1,
@@ -268,7 +340,9 @@ async function ecbCsv(seriesKey) {
   const last = lines[lines.length - 1].split(",");
 
   const obj = {};
-  header.forEach((h, i) => obj[h] = last[i]);
+  header.forEach((h, i) => {
+    obj[h] = last[i];
+  });
 
   return obj;
 }
@@ -279,28 +353,35 @@ app.get("/api/bce/tipos", async (req, res) => {
     const deposit = await ecbCsv("B.U2.EUR.4F.KR.DFR.LEV");
     const marginal = await ecbCsv("B.U2.EUR.4F.KR.MLFR.LEV");
 
+    const operaciones = normalizarTipoBCE(main.OBS_VALUE);
+    const deposito = normalizarTipoBCE(deposit.OBS_VALUE);
+    const marginalCredito = normalizarTipoBCE(marginal.OBS_VALUE);
+
     res.json(ok({
       fuente: "ECB Data Portal · Official interest rates",
       estado_dato: "OK",
       tipos: {
         operaciones_principales: {
-          valor: toNumber(main.OBS_VALUE),
-          fecha: main.TIME_PERIOD
+          valor: operaciones,
+          fecha: main.TIME_PERIOD,
+          semaforo: semaforoMenor(operaciones, 2, 4)
         },
         facilidad_deposito: {
-          valor: toNumber(deposit.OBS_VALUE),
-          fecha: deposit.TIME_PERIOD
+          valor: deposito,
+          fecha: deposit.TIME_PERIOD,
+          semaforo: semaforoMenor(deposito, 2, 4)
         },
         facilidad_marginal_credito: {
-          valor: toNumber(marginal.OBS_VALUE),
-          fecha: marginal.TIME_PERIOD
+          valor: marginalCredito,
+          fecha: marginal.TIME_PERIOD,
+          semaforo: semaforoMenor(marginalCredito, 2.5, 4.5)
         }
       },
       aviso:
         "Tipos oficiales del BCE. No equivalen directamente al tipo hipotecario ofrecido al cliente."
     }));
   } catch (e) {
-    res.json(error("No se pudo obtener tipos BCE.", {
+    res.json(fail("No se pudo obtener tipos BCE.", {
       detalle: e.message
     }));
   }
@@ -308,7 +389,6 @@ app.get("/api/bce/tipos", async (req, res) => {
 
 /* =========================================================
    INE · IPC
-   Tabla configurable. Por defecto se usa 50902 como tabla IPC nacional.
 ========================================================= */
 
 app.get("/api/ine/ipc", async (req, res) => {
@@ -318,26 +398,21 @@ app.get("/api/ine/ipc", async (req, res) => {
     const rows = Array.isArray(data) ? data : [];
 
     const candidato =
-      rows.find(r =>
-        cleanText(r.Nombre || "").includes("indice general") &&
-        cleanText(r.Nombre || "").includes("nacional") &&
-        cleanText(r.Nombre || "").includes("variacion anual")
-      ) ||
-      rows.find(r =>
-        cleanText(r.Nombre || "").includes("indice general") &&
-        cleanText(r.Nombre || "").includes("nacional")
-      );
+      elegirSerie(rows, ["nacional", "indice general", "variacion anual"]) ||
+      elegirSerie(rows, ["indice general", "variacion anual"]) ||
+      rows[0];
 
     if (!candidato || !candidato.Data?.length) {
       return res.json(ok({
         fuente: `INE WSTempus · Tabla ${tabla}`,
         estado_dato: "NO_DISPONIBLE",
         aviso:
-          "INE respondió, pero no se localizó serie IPC nacional consolidable. Revisar tabla configurada."
+          "INE respondió, pero no se localizó serie IPC nacional en variación anual."
       }));
     }
 
-    const dato = candidato.Data[0];
+    const dato = getLastDato(candidato);
+    const valor = toNumber(dato.Valor);
 
     res.json(ok({
       fuente: `INE WSTempus · Tabla ${tabla}`,
@@ -345,12 +420,13 @@ app.get("/api/ine/ipc", async (req, res) => {
       indicador: candidato.Nombre,
       fecha: dato.Anyo,
       periodo: dato.FK_Periodo,
-      valor: dato.Valor,
+      valor,
+      semaforo: semaforoMenor(valor, 2, 4),
       aviso:
-        "Dato IPC obtenido desde INE. Verificar si la serie localizada es índice o variación anual según tabla."
+        "Dato IPC obtenido desde INE. Serie nacional del Índice general en variación anual."
     }));
   } catch (e) {
-    res.json(error("No se pudo obtener IPC INE.", {
+    res.json(fail("No se pudo obtener IPC INE.", {
       detalle: e.message
     }));
   }
@@ -358,7 +434,7 @@ app.get("/api/ine/ipc", async (req, res) => {
 
 /* =========================================================
    INE · PIB
-   Recomendado configurar tabla exacta en variable INE_PIB_TABLA.
+   Render: INE_PIB_TABLA=3156
 ========================================================= */
 
 app.get("/api/ine/pib", async (req, res) => {
@@ -370,7 +446,7 @@ app.get("/api/ine/pib", async (req, res) => {
         fuente: "INE WSTempus · PIB",
         estado_dato: "NO_CONFIGURADO",
         aviso:
-          "Debe definirse INE_PIB_TABLA en Render con la tabla exacta de PIB que se quiera explotar."
+          "Debe definirse INE_PIB_TABLA en Render."
       }));
     }
 
@@ -378,10 +454,11 @@ app.get("/api/ine/pib", async (req, res) => {
     const rows = Array.isArray(data) ? data : [];
 
     const candidato =
-      rows.find(r =>
-        cleanText(r.Nombre || "").includes("producto interior bruto") ||
-        cleanText(r.Nombre || "").includes("pib")
-      ) || rows[0];
+      elegirSerie(rows, ["producto interior bruto", "variacion anual"]) ||
+      elegirSerie(rows, ["producto interior bruto"]) ||
+      elegirSerie(rows, ["pib", "variacion anual"]) ||
+      elegirSerie(rows, ["pib"]) ||
+      rows[0];
 
     if (!candidato || !candidato.Data?.length) {
       return res.json(ok({
@@ -392,7 +469,8 @@ app.get("/api/ine/pib", async (req, res) => {
       }));
     }
 
-    const dato = candidato.Data[0];
+    const dato = getLastDato(candidato);
+    const valor = toNumber(dato.Valor);
 
     res.json(ok({
       fuente: `INE WSTempus · Tabla ${tabla}`,
@@ -400,12 +478,215 @@ app.get("/api/ine/pib", async (req, res) => {
       indicador: candidato.Nombre,
       fecha: dato.Anyo,
       periodo: dato.FK_Periodo,
-      valor: dato.Valor,
+      valor,
+      semaforo: semaforoMayor(valor, 2, 0),
+      interpretacion:
+        valor > 2
+          ? "Economía expansiva."
+          : valor >= 0
+          ? "Crecimiento moderado."
+          : "Entorno de desaceleración o contracción.",
       aviso:
         "Dato PIB obtenido desde INE según tabla configurada."
     }));
   } catch (e) {
-    res.json(error("No se pudo obtener PIB INE.", {
+    res.json(fail("No se pudo obtener PIB INE.", {
+      detalle: e.message
+    }));
+  }
+});
+
+/* =========================================================
+   INE · PARO
+   Render:
+   INE_PARO_CCAA_TABLA=4247
+   INE_PARO_PROVINCIA_TABLA=3996
+========================================================= */
+
+app.get("/api/ine/paro", async (req, res) => {
+  try {
+    const ambito = String(req.query.ambito || "ccaa").toLowerCase();
+    const nombre = String(req.query.nombre || "").trim();
+
+    const tabla =
+      ambito === "provincia"
+        ? process.env.INE_PARO_PROVINCIA_TABLA
+        : process.env.INE_PARO_CCAA_TABLA;
+
+    if (!tabla) {
+      return res.json(ok({
+        fuente: "INE WSTempus · EPA / tasa de paro",
+        estado_dato: "NO_CONFIGURADO",
+        aviso:
+          "Debe definirse INE_PARO_CCAA_TABLA o INE_PARO_PROVINCIA_TABLA en Render."
+      }));
+    }
+
+    const data = await ineTablaJson(tabla, 1);
+    const rows = Array.isArray(data) ? data : [];
+    const target = cleanText(nombre);
+
+    const candidato =
+      rows.find(r => {
+        const serie = cleanText(r.Nombre || "");
+        return (
+          (!target || serie.includes(target)) &&
+          serie.includes("tasa de paro")
+        );
+      }) ||
+      rows.find(r => cleanText(r.Nombre || "").includes("tasa de paro"));
+
+    if (!candidato || !candidato.Data?.length) {
+      return res.json(ok({
+        fuente: `INE WSTempus · Tabla ${tabla}`,
+        estado_dato: "NO_DISPONIBLE",
+        ambito,
+        territorio: nombre || null,
+        aviso:
+          "INE respondió, pero no se localizó una serie de tasa de paro válida."
+      }));
+    }
+
+    const dato = getLastDato(candidato);
+    const valor = toNumber(dato.Valor);
+
+    res.json(ok({
+      fuente: `INE WSTempus · Tabla ${tabla}`,
+      estado_dato: "OK",
+      ambito,
+      territorio: nombre || null,
+      indicador: candidato.Nombre,
+      fecha: dato.Anyo,
+      periodo: dato.FK_Periodo,
+      valor,
+      semaforo: semaforoMenor(valor, 8, 14),
+      interpretacion:
+        valor < 8
+          ? "Entorno laboral sólido."
+          : valor <= 14
+          ? "Mercado laboral sensible."
+          : "Entorno laboral tensionado.",
+      aviso:
+        "Dato de tasa de paro obtenido desde INE."
+    }));
+  } catch (e) {
+    res.json(fail("No se pudo obtener tasa de paro INE.", {
+      detalle: e.message
+    }));
+  }
+});
+
+/* =========================================================
+   INE · SALARIOS
+   Render: INE_SALARIOS_TABLA=10882
+========================================================= */
+
+app.get("/api/ine/salarios", async (req, res) => {
+  try {
+    const tabla = process.env.INE_SALARIOS_TABLA;
+
+    if (!tabla) {
+      return res.json(ok({
+        fuente: "INE WSTempus · Salarios",
+        estado_dato: "NO_CONFIGURADO",
+        aviso:
+          "Debe definirse INE_SALARIOS_TABLA en Render."
+      }));
+    }
+
+    const data = await ineTablaJson(tabla, 1);
+    const rows = Array.isArray(data) ? data : [];
+
+    const candidato =
+      elegirSerie(rows, ["ganancia media"]) ||
+      elegirSerie(rows, ["salario medio"]) ||
+      elegirSerie(rows, ["salario"]) ||
+      rows[0];
+
+    if (!candidato || !candidato.Data?.length) {
+      return res.json(ok({
+        fuente: `INE WSTempus · Tabla ${tabla}`,
+        estado_dato: "NO_DISPONIBLE",
+        aviso:
+          "INE respondió, pero no se localizó una serie salarial consolidable."
+      }));
+    }
+
+    const dato = getLastDato(candidato);
+    const valor = toNumber(dato.Valor);
+
+    res.json(ok({
+      fuente: `INE WSTempus · Tabla ${tabla}`,
+      estado_dato: "OK",
+      indicador: candidato.Nombre,
+      fecha: dato.Anyo,
+      periodo: dato.FK_Periodo,
+      valor,
+      interpretacion:
+        "El salario medio sirve como referencia comparativa del esfuerzo económico y nivel adquisitivo.",
+      aviso:
+        "Dato salarial obtenido desde INE según tabla configurada."
+    }));
+  } catch (e) {
+    res.json(fail("No se pudo obtener salarios INE.", {
+      detalle: e.message
+    }));
+  }
+});
+
+/* =========================================================
+   CIS · ICC
+   Render: CIS_ICC_ESTUDIO=3549
+========================================================= */
+
+app.get("/api/cis/icc", async (req, res) => {
+  try {
+    const estudio = process.env.CIS_ICC_ESTUDIO;
+
+    if (!estudio) {
+      return res.json(ok({
+        fuente: "CIS · Índice de Confianza del Consumidor",
+        estado_dato: "NO_CONFIGURADO",
+        aviso:
+          "Debe definirse CIS_ICC_ESTUDIO en Render."
+      }));
+    }
+
+    const url = `https://www.cis.es/documents/d/cis/es${estudio}marmt_a`;
+
+    const response = await http.get(url, {
+      responseType: "text"
+    });
+
+    const text = String(response.data);
+    const matches = text.match(/\d+,\d+/g);
+
+    const valor = matches?.length
+      ? toNumber(matches[matches.length - 1])
+      : null;
+
+    res.json(ok({
+      fuente: "CIS · Índice de Confianza del Consumidor",
+      estado_dato: valor !== null ? "OK" : "NO_DISPONIBLE",
+      estudio,
+      valor,
+      semaforo:
+        valor !== null
+          ? semaforoMayor(valor, 100, 80)
+          : null,
+      interpretacion:
+        valor === null
+          ? "No se ha podido consolidar el dato ICC."
+          : valor > 100
+          ? "Consumidor optimista."
+          : valor >= 80
+          ? "Consumidor prudente."
+          : "Consumidor con desconfianza económica.",
+      aviso:
+        "Dato ICC interpretado desde estudio CIS configurado. Debe comprobarse que el documento mantiene la estructura esperada."
+    }));
+  } catch (e) {
+    res.json(fail("No se pudo obtener ICC del CIS.", {
       detalle: e.message
     }));
   }
@@ -417,22 +698,144 @@ app.get("/api/ine/pib", async (req, res) => {
 
 app.get("/api/contexto-economico", async (req, res) => {
   try {
-    const [bce, ipc, pib] = await Promise.allSettled([
-      axios.get(`http://localhost:${PORT}/api/bce/tipos`),
-      axios.get(`http://localhost:${PORT}/api/ine/ipc`),
-      axios.get(`http://localhost:${PORT}/api/ine/pib`)
+    const base = `http://localhost:${PORT}`;
+
+    const [
+      bce,
+      ipc,
+      pib,
+      paroCcaa,
+      paroProvincia,
+      salarios,
+      cis
+    ] = await Promise.allSettled([
+      http.get(`${base}/api/bce/tipos`),
+      http.get(`${base}/api/ine/ipc`),
+      http.get(`${base}/api/ine/pib`),
+      http.get(`${base}/api/ine/paro?ambito=ccaa&nombre=Extremadura`),
+      http.get(`${base}/api/ine/paro?ambito=provincia&nombre=Cáceres`),
+      http.get(`${base}/api/ine/salarios`),
+      http.get(`${base}/api/cis/icc`)
     ]);
 
     res.json(ok({
       fuente: "Contexto económico agrupado",
+      estado_dato: "OK",
       bce: bce.status === "fulfilled" ? bce.value.data : null,
       ipc: ipc.status === "fulfilled" ? ipc.value.data : null,
       pib: pib.status === "fulfilled" ? pib.value.data : null,
+      paro_ccaa: paroCcaa.status === "fulfilled" ? paroCcaa.value.data : null,
+      paro_provincia: paroProvincia.status === "fulfilled" ? paroProvincia.value.data : null,
+      salarios: salarios.status === "fulfilled" ? salarios.value.data : null,
+      cis: cis.status === "fulfilled" ? cis.value.data : null,
       aviso:
-        "Sólo se deben usar en decisión los indicadores con estado_dato OK."
+        "Sólo deben interpretarse datos con estado_dato OK."
     }));
   } catch (e) {
-    res.json(error("No se pudo generar contexto económico.", {
+    res.json(fail("No se pudo generar contexto económico.", {
+      detalle: e.message
+    }));
+  }
+});
+
+/* =========================================================
+   MACRODECISIÓN
+========================================================= */
+
+app.get("/api/macro-decision", async (req, res) => {
+  try {
+    const base = `http://localhost:${PORT}`;
+    const response = await http.get(`${base}/api/contexto-economico`);
+    const c = response.data;
+
+    const indicadores = [];
+
+    function sumar(nombre, color) {
+      if (!color || color === "gris") return;
+
+      let score = 0;
+      if (color === "verde") score = 100;
+      else if (color === "naranja") score = 60;
+      else if (color === "rojo") score = 20;
+
+      indicadores.push({ nombre, color, score });
+    }
+
+    sumar(
+      "BCE",
+      c.bce?.tipos?.operaciones_principales?.semaforo?.color
+    );
+
+    sumar(
+      "IPC",
+      c.ipc?.semaforo?.color
+    );
+
+    sumar(
+      "PIB",
+      c.pib?.semaforo?.color
+    );
+
+    sumar(
+      "Paro CCAA",
+      c.paro_ccaa?.semaforo?.color
+    );
+
+    sumar(
+      "Paro provincia",
+      c.paro_provincia?.semaforo?.color
+    );
+
+    sumar(
+      "CIS",
+      c.cis?.semaforo?.color
+    );
+
+    const final =
+      indicadores.length > 0
+        ? Math.round(
+            indicadores.reduce((acc, item) => acc + item.score, 0) /
+            indicadores.length
+          )
+        : null;
+
+    let color = "gris";
+    let nivel = "Sin datos";
+    let interpretacion =
+      "No existen suficientes datos macroeconómicos para emitir una lectura fiable.";
+
+    if (final !== null) {
+      if (final >= 75) {
+        color = "verde";
+        nivel = "Contexto favorable";
+        interpretacion =
+          "El contexto económico general es razonablemente favorable para operaciones equilibradas.";
+      } else if (final >= 50) {
+        color = "naranja";
+        nivel = "Contexto prudente";
+        interpretacion =
+          "El contexto económico permite operaciones viables, aunque exige prudencia en compras ajustadas.";
+      } else {
+        color = "rojo";
+        nivel = "Contexto tensionado";
+        interpretacion =
+          "El contexto macroeconómico aconseja reforzar margen financiero, ahorro y prudencia antes de comprar.";
+      }
+    }
+
+    res.json(ok({
+      fuente: "Motor macroeconómico InmoRecursos",
+      estado_dato: final !== null ? "OK" : "NO_DISPONIBLE",
+      score: final,
+      semaforo: { color, nivel },
+      indicadores_usados: indicadores,
+      interpretacion,
+      contexto: c,
+      aviso:
+        "La macrodecisión interpreta únicamente datos oficiales con estado_dato OK."
+    }));
+  } catch (e) {
+    res.json(fail("No se pudo generar macrodecisión.", {
       detalle: e.message
     }));
   }
