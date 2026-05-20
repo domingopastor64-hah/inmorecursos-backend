@@ -101,9 +101,9 @@ app.get("/", (req, res) => {
   res.json(ok({
     estado: "Servidor activo",
     endpoints: [
-      "/api/geo?direccion=Plasencia",
-      "/api/entorno?direccion=Plasencia",
-      "/api/servicios?direccion=Plasencia&radio=1000",
+      "/api/geo?direccion=Plasencia, Cáceres, España",
+      "/api/entorno?direccion=Plasencia, Cáceres, España",
+      "/api/servicios?direccion=Plasencia, Cáceres, España&radio=1000",
       "/api/mivau/valor-tasado?municipio=Plasencia",
       "/api/ine/renta?municipio=Plasencia",
       "/api/bce/tipos",
@@ -123,40 +123,58 @@ app.get("/", (req, res) => {
 ========================================================= */
 
 async function geocodePhoton(query) {
-  const response = await http.get("https://photon.komoot.io/api/", {
-    params: {
-      q: query,
-      limit: 5,
-      lang: "es"
+  const q = String(query || "").trim();
+  if (!q) return null;
+
+  const queries = [
+    q,
+    `${q}, España`,
+    `${q}, Spain`
+  ];
+
+  for (const search of queries) {
+    try {
+      const response = await http.get("https://photon.komoot.io/api/", {
+        params: {
+          q: search,
+          limit: 10
+        }
+      });
+
+      const features = response.data?.features || [];
+
+      const item =
+        features.find(f => f.properties?.countrycode === "ES") ||
+        features.find(f => cleanText(f.properties?.country || "").includes("spain")) ||
+        features[0];
+
+      if (!item) continue;
+
+      const [lon, lat] = item.geometry.coordinates;
+
+      return {
+        lat,
+        lon,
+        nombre: item.properties?.name || search,
+        municipio:
+          item.properties?.city ||
+          item.properties?.town ||
+          item.properties?.village ||
+          item.properties?.county ||
+          item.properties?.name ||
+          null,
+        provincia: item.properties?.county || null,
+        comunidad: item.properties?.state || null,
+        pais: item.properties?.country || null,
+        country_code: item.properties?.countrycode || null,
+        fuente: "Photon · OpenStreetMap"
+      };
+    } catch {
+      continue;
     }
-  });
+  }
 
-  const features = response.data?.features || [];
-
-  const item =
-    features.find(f => f.properties?.countrycode === "ES") ||
-    features[0];
-
-  if (!item) return null;
-
-  const [lon, lat] = item.geometry.coordinates;
-
-  return {
-    lat,
-    lon,
-    nombre: item.properties?.name || query,
-    municipio:
-      item.properties?.city ||
-      item.properties?.town ||
-      item.properties?.village ||
-      item.properties?.county ||
-      null,
-    provincia: item.properties?.county || null,
-    comunidad: item.properties?.state || null,
-    pais: item.properties?.country || null,
-    country_code: item.properties?.countrycode || null,
-    fuente: "Photon · OpenStreetMap"
-  };
+  return null;
 }
 
 app.get("/api/geo", async (req, res) => {
