@@ -2,7 +2,6 @@ import express from "express";
 import cors from "cors";
 import axios from "axios";
 import * as XLSX from "xlsx";
-import { XMLParser } from "fast-xml-parser";
 
 const app = express();
 app.use(cors());
@@ -13,12 +12,6 @@ const PORT = process.env.PORT || 3000;
 const http = axios.create({
   timeout: 30000,
   headers: { "User-Agent": "InmoRecursos-Punto-Control/1.0" }
-});
-
-const xmlParser = new XMLParser({
-  ignoreAttributes: false,
-  attributeNamePrefix: "",
-  textNodeName: "text"
 });
 
 function ok(data = {}) {
@@ -72,6 +65,12 @@ function scoreColor(color) {
   return null;
 }
 
+function normalizarTipoBCE(v) {
+  const n = toNumber(v);
+  if (n === null) return null;
+  return n > 20 ? n / 100 : n;
+}
+
 async function ineTablaJson(tabla, nult = 1) {
   const url = `https://servicios.ine.es/wstempus/js/es/DATOS_TABLA/${tabla}`;
   const response = await http.get(url, { params: { nult } });
@@ -94,12 +93,6 @@ function getLastDato(serie) {
   return serie.Data[0];
 }
 
-function normalizarTipoBCE(v) {
-  const n = toNumber(v);
-  if (n === null) return null;
-  return n > 20 ? n / 100 : n;
-}
-
 /* =========================================================
    HEALTH
 ========================================================= */
@@ -108,9 +101,16 @@ app.get("/", (req, res) => {
   res.json(ok({
     estado: "Servidor activo",
     endpoints: [
-      "/api/entorno?municipio=Plasencia",
+      "/api/geo?direccion=Plasencia",
+      "/api/entorno?direccion=Plasencia",
+      "/api/servicios?direccion=Plasencia&radio=1000",
       "/api/mivau/valor-tasado?municipio=Plasencia",
       "/api/ine/renta?municipio=Plasencia",
+      "/api/bce/tipos",
+      "/api/ine/ipc",
+      "/api/ine/pib",
+      "/api/ine/paro?ambito=ccaa&nombre=Extremadura",
+      "/api/ine/paro?ambito=provincia&nombre=Cáceres",
       "/api/ine/salarios",
       "/api/contexto-economico",
       "/api/macro-decision"
@@ -119,7 +119,87 @@ app.get("/", (req, res) => {
 });
 
 /* =========================================================
-   ENTORNO · OPEN-METEO
+   GEO · PHOTON
+========================================================= */
+
+async function geocodePhoton(query) {
+  const response = await http.get("https://photon.komoot.io/api/", {
+    params: {
+      q: query,
+      limit: 5,
+      lang: "es"
+    }
+  });
+
+  const features = response.data?.features || [];
+
+  const item =
+    features.find(f => f.properties?.countrycode === "ES") ||
+    features[0];
+
+  if (!item) return null;
+
+  const [lon, lat] = item.geometry.coordinates;
+
+  return {
+    lat,
+    lon,
+    nombre: item.properties?.name || query,
+    municipio:
+      item.properties?.city ||
+      item.properties?.town ||
+      item.properties?.village ||
+      item.properties?.county ||
+      null,
+    provincia: item.properties?.county || null,
+    comunidad: item.properties?.state || null,
+    pais: item.properties?.country || null,
+    country_code: item.properties?.countrycode || null,
+    fuente: "Photon · OpenStreetMap"
+  };
+}
+
+app.get("/api/geo", async (req, res) => {
+  try {
+    const direccion = String(req.query.direccion || req.query.municipio || "").trim();
+
+    if (!direccion) {
+      return res.json(ok({
+        fuente: "Photon",
+        estado_dato: "NO_DISPONIBLE",
+        aviso: "Debe indicarse dirección o municipio."
+      }));
+    }
+
+    const geo = await geocodePhoton(direccion);
+
+    if (!geo) {
+      return res.json(ok({
+        fuente: "Photon",
+        estado_dato: "NO_DISPONIBLE",
+        direccion_solicitada: direccion,
+        aviso: "No se pudo geocodificar."
+      }));
+    }
+
+    res.json(ok({
+      fuente: "Photon · OpenStreetMap",
+      estado_dato: "OK",
+      direccion_solicitada: direccion,
+      geocoding: geo
+    }));
+  } catch (e) {
+    res.json(ok({
+      fuente: "Photon",
+      estado_dato: "NO_DISPONIBLE",
+      aviso: "No se pudo geocodificar.",
+      detalle: e.message
+    }));
+  }
+});
+
+/* =========================================================
+   ENTORNO · PHOTON + OPEN-METEO
 ========================================================= */
 
 app.get("/api/entorno", async (req, res) => {
@@ -128,37 +208,25 @@ app.get("/api/entorno", async (req, res) => {
 
     if (!direccion) {
       return res.json(ok({
-        fuente: "Open-Meteo",
+        fuente: "Photon + Open-Meteo",
         estado_dato: "NO_DISPONIBLE",
         aviso: "Debe indicarse dirección o municipio."
       }));
     }
 
-    const geoUrl = "https://geocoding-api.open-meteo.com/v1/search";
+    const geo = await geocodePhoton(direccion);
 
-    const geoResponse = await http.get(geoUrl, {
-      params: {
-        name: direccion,
-        count: 1,
-        language: "es",
-        format: "json",
-        countryCode: "ES"
-      }
-    });
-
-    const item = geoResponse.data?.results?.[0];
-
-    if (!item) {
+    if (!geo) {
       return res.json(ok({
-        fuente: "Open-Meteo Geocoding",
+        fuente: "Photon",
         estado_dato: "NO_DISPONIBLE",
         direccion_solicitada: direccion,
-        aviso: "No se pudo geocodificar el municipio o dirección."
+        aviso: "No se pudo geocodificar."
       }));
     }
 
-    const lat = item.latitude;
-    const lon = item.longitude;
+    const lat = geo.lat;
+    const lon = geo.lon;
 
     const airResponse = await http.get("https://air-quality-api.open-meteo.com/v1/air-quality", {
       params: {
@@ -197,18 +265,10 @@ app.get("/api/entorno", async (req, res) => {
     puntuacion = Math.max(0, Math.min(100, Math.round(puntuacion)));
 
     res.json(ok({
-      fuente: "Open-Meteo Geocoding España + Open-Meteo Air Quality",
+      fuente: "Photon + Open-Meteo Air Quality",
       estado_dato: "OK",
       direccion_solicitada: direccion,
-      geocoding: {
-        lat,
-        lon,
-        municipio: item.name,
-        provincia: item.admin2 || item.admin1 || null,
-        comunidad: item.admin1 || null,
-        pais: item.country,
-        country_code: item.country_code
-      },
+      geocoding: geo,
       aire: {
         pm10,
         pm25,
@@ -231,11 +291,11 @@ app.get("/api/entorno", async (req, res) => {
             ? "Entorno ambiental aceptable con precauciones."
             : "Entorno ambiental sensible o desfavorable."
       },
-      aviso: "Datos obtenidos de Open-Meteo. No sustituye mediciones locales oficiales de estaciones concretas."
+      aviso: "Datos obtenidos desde Photon y Open-Meteo. No sustituye mediciones oficiales locales de estaciones concretas."
     }));
   } catch (e) {
     res.json(ok({
-      fuente: "Open-Meteo",
+      fuente: "Photon + Open-Meteo",
       estado_dato: "NO_DISPONIBLE",
       aviso: "No se pudo obtener entorno ambiental.",
       detalle: e.message
@@ -249,12 +309,173 @@ app.get("/api/openmeteo", async (req, res) => {
 });
 
 /* =========================================================
-   MIVAU · VALOR TASADO MUNICIPIOS
+   SERVICIOS · PHOTON + OVERPASS
 ========================================================= */
 
-function parseMivauNumber(v) {
-  return toNumber(v);
+function overpassQuery(lat, lon, radius = 1000) {
+  return `
+[out:json][timeout:25];
+(
+  node["shop"="supermarket"](around:${radius},${lat},${lon});
+  way["shop"="supermarket"](around:${radius},${lat},${lon});
+
+  node["amenity"="pharmacy"](around:${radius},${lat},${lon});
+  way["amenity"="pharmacy"](around:${radius},${lat},${lon});
+
+  node["amenity"="school"](around:${radius},${lat},${lon});
+  way["amenity"="school"](around:${radius},${lat},${lon});
+
+  node["amenity"="hospital"](around:${radius},${lat},${lon});
+  way["amenity"="hospital"](around:${radius},${lat},${lon});
+
+  node["amenity"="clinic"](around:${radius},${lat},${lon});
+  way["amenity"="clinic"](around:${radius},${lat},${lon});
+
+  node["leisure"="park"](around:${radius},${lat},${lon});
+  way["leisure"="park"](around:${radius},${lat},${lon});
+
+  node["amenity"="bank"](around:${radius},${lat},${lon});
+  way["amenity"="bank"](around:${radius},${lat},${lon});
+
+  node["amenity"="fuel"](around:${radius},${lat},${lon});
+  way["amenity"="fuel"](around:${radius},${lat},${lon});
+
+  node["highway"="bus_stop"](around:${radius},${lat},${lon});
+  node["railway"="station"](around:${radius},${lat},${lon});
+);
+out center tags;
+`;
 }
+
+function clasificarServicio(tags = {}) {
+  if (tags.shop === "supermarket") return "supermercados";
+  if (tags.amenity === "pharmacy") return "farmacias";
+  if (tags.amenity === "school") return "colegios";
+  if (tags.amenity === "hospital" || tags.amenity === "clinic") return "salud";
+  if (tags.leisure === "park") return "zonas_verdes";
+  if (tags.amenity === "bank") return "bancos";
+  if (tags.amenity === "fuel") return "gasolineras";
+  if (tags.highway === "bus_stop" || tags.railway === "station") return "transporte";
+  return "otros";
+}
+
+function distanciaMetros(lat1, lon1, lat2, lon2) {
+  const R = 6371000;
+  const toRad = x => x * Math.PI / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(lat1)) *
+    Math.cos(toRad(lat2)) *
+    Math.sin(dLon / 2) ** 2;
+
+  return Math.round(R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)));
+}
+
+app.get("/api/servicios", async (req, res) => {
+  try {
+    const direccion = String(req.query.direccion || req.query.municipio || "").trim();
+    const radius = Number(req.query.radio || 1000);
+
+    if (!direccion) {
+      return res.json(ok({
+        fuente: "Photon + Overpass",
+        estado_dato: "NO_DISPONIBLE",
+        aviso: "Debe indicarse dirección o municipio."
+      }));
+    }
+
+    const geo = await geocodePhoton(direccion);
+
+    if (!geo) {
+      return res.json(ok({
+        fuente: "Photon",
+        estado_dato: "NO_DISPONIBLE",
+        direccion_solicitada: direccion,
+        aviso: "No se pudo geocodificar."
+      }));
+    }
+
+    const query = overpassQuery(geo.lat, geo.lon, radius);
+
+    const overpass = await http.post(
+      "https://overpass-api.de/api/interpreter",
+      query,
+      { headers: { "Content-Type": "text/plain" } }
+    );
+
+    const elements = overpass.data?.elements || [];
+
+    const servicios = elements.map(e => {
+      const lat = e.lat || e.center?.lat;
+      const lon = e.lon || e.center?.lon;
+
+      return {
+        tipo: clasificarServicio(e.tags),
+        nombre: e.tags?.name || "Sin nombre",
+        lat,
+        lon,
+        distancia_m: lat && lon ? distanciaMetros(geo.lat, geo.lon, lat, lon) : null,
+        tags: e.tags || {}
+      };
+    }).filter(x => x.lat && x.lon);
+
+    const resumen = {
+      supermercados: servicios.filter(x => x.tipo === "supermercados").length,
+      farmacias: servicios.filter(x => x.tipo === "farmacias").length,
+      colegios: servicios.filter(x => x.tipo === "colegios").length,
+      salud: servicios.filter(x => x.tipo === "salud").length,
+      zonas_verdes: servicios.filter(x => x.tipo === "zonas_verdes").length,
+      bancos: servicios.filter(x => x.tipo === "bancos").length,
+      gasolineras: servicios.filter(x => x.tipo === "gasolineras").length,
+      transporte: servicios.filter(x => x.tipo === "transporte").length
+    };
+
+    const puntuacion = Math.min(100,
+      resumen.supermercados * 12 +
+      resumen.farmacias * 10 +
+      resumen.colegios * 10 +
+      resumen.salud * 10 +
+      resumen.zonas_verdes * 8 +
+      resumen.transporte * 8 +
+      resumen.bancos * 4 +
+      resumen.gasolineras * 3
+    );
+
+    res.json(ok({
+      fuente: "Photon + Overpass API · OpenStreetMap",
+      estado_dato: "OK",
+      direccion_solicitada: direccion,
+      radio_metros: radius,
+      geocoding: geo,
+      resumen,
+      puntuacion_servicios: puntuacion,
+      lectura:
+        puntuacion >= 70
+          ? "Entorno con buena dotación de servicios cercanos."
+          : puntuacion >= 40
+          ? "Entorno con dotación media de servicios."
+          : "Entorno con baja dotación de servicios próximos.",
+      servicios: servicios
+        .sort((a, b) => (a.distancia_m || 99999) - (b.distancia_m || 99999))
+        .slice(0, 80),
+      aviso: "Datos obtenidos desde OpenStreetMap mediante Overpass. La calidad depende del mantenimiento comunitario de OSM."
+    }));
+  } catch (e) {
+    res.json(ok({
+      fuente: "Photon + Overpass",
+      estado_dato: "NO_DISPONIBLE",
+      aviso: "No se pudieron obtener servicios cercanos.",
+      detalle: e.message
+    }));
+  }
+});
+
+/* =========================================================
+   MIVAU · VALOR TASADO
+========================================================= */
 
 app.get("/api/mivau/valor-tasado", async (req, res) => {
   try {
@@ -274,6 +495,7 @@ app.get("/api/mivau/valor-tasado", async (req, res) => {
     });
 
     const html = String(portada.data);
+
     const enlaces = [...html.matchAll(/sedal\/35\d+\.XLS/gi)]
       .map(m => m[0])
       .filter((v, i, arr) => arr.indexOf(v) === i);
@@ -314,24 +536,21 @@ app.get("/api/mivau/valor-tasado", async (req, res) => {
             const nombre = cleanText(row?.[2] || row?.[1] || row?.[0] || "");
             if (nombre !== target) continue;
 
-            const nums = row.map(parseMivauNumber);
+            const nums = row.map(toNumber);
 
-            let valorNueva = null;
-            let valorUsada = null;
-            let valorTotal = null;
-            let tasNueva = null;
-            let tasUsada = null;
-            let tasTotal = null;
+            let valorNueva = nums[3];
+            let valorUsada = nums[4];
+            let valorTotal = nums[5];
 
-            if (nums.length >= 10) {
-              valorNueva = nums[3];
-              valorUsada = nums[4];
-              valorTotal = nums[5];
-              tasNueva = nums[7];
-              tasUsada = nums[8];
-              tasTotal = nums[9];
-            } else {
+            let tasNueva = nums[7];
+            let tasUsada = nums[8];
+            let tasTotal = nums[9];
+
+            if (valorTotal === null && valorUsada === null && valorNueva === null) {
               valorTotal = nums.find(n => n !== null && n > 300 && n < 6000);
+            }
+
+            if (tasTotal === null && tasUsada === null && tasNueva === null) {
               tasTotal = [...nums].reverse().find(n => n !== null && n >= 1 && n < 10000);
             }
 
@@ -575,7 +794,7 @@ app.get("/api/ine/ipc", async (req, res) => {
 });
 
 /* =========================================================
-   INE · PIB VARIACIÓN ANUAL
+   INE · PIB
 ========================================================= */
 
 app.get("/api/ine/pib", async (req, res) => {
@@ -705,7 +924,7 @@ app.get("/api/ine/paro", async (req, res) => {
 });
 
 /* =========================================================
-   INE · SALARIO MEDIO BRUTO · AMBOS SEXOS · ESPAÑA
+   INE · SALARIOS
 ========================================================= */
 
 app.get("/api/ine/salarios", async (req, res) => {
@@ -717,15 +936,13 @@ app.get("/api/ine/salarios", async (req, res) => {
       elegirSerie(rows, ["salario medio bruto", "ambos sexos", "espana"], ["mujeres", "hombres"]) ||
       elegirSerie(rows, ["salario medio bruto", "ambos sexos"], ["mujeres", "hombres"]) ||
       elegirSerie(rows, ["salario medio", "ambos sexos", "espana"], ["mujeres", "hombres"]) ||
-      elegirSerie(rows, ["salario medio", "ambos sexos"], ["mujeres", "hombres"]) ||
-      elegirSerie(rows, ["salario medio bruto"], ["mujeres"]) ||
-      elegirSerie(rows, ["salario medio"], ["mujeres"]);
+      elegirSerie(rows, ["salario medio", "ambos sexos"], ["mujeres", "hombres"]);
 
     if (!candidato) {
       return res.json(ok({
         fuente: `INE WSTempus · Tabla ${tabla}`,
         estado_dato: "NO_DISPONIBLE",
-        aviso: "No se localizó salario medio bruto de ambos sexos."
+        aviso: "No se localizó salario medio bruto de ambos sexos. No se usa dato de hombres ni mujeres para evitar sesgo."
       }));
     }
 
