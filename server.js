@@ -1132,6 +1132,29 @@ function pcvUltimosDos(serie) {
   };
 }
 
+function pcvNormalizarTerritorio(v = "") {
+  return cleanText(v)
+    .replace(/^\d+\s+/, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function pcvSerieIncluyeTerritorio(nombreSerie = "", territorio = "") {
+  const nombre = cleanText(nombreSerie);
+  const t = pcvNormalizarTerritorio(territorio);
+
+  if (!t) return true;
+
+  return (
+    nombre.includes(t) ||
+    nombre.includes(` ${t}.`) ||
+    nombre.includes(` ${t} `) ||
+    nombre.includes(`${t}.`) ||
+    nombre.includes(`${t},`) ||
+    nombre.includes(`${t} `)
+  );
+}
+
 function pcvBuscarSerie(rows, patrones = [], excluidos = []) {
   if (!Array.isArray(rows)) return null;
 
@@ -1143,6 +1166,52 @@ function pcvBuscarSerie(rows, patrones = [], excluidos = []) {
   }) || null;
 }
 
+function pcvBuscarSerieTerritorio(rows, territorio, patrones = [], excluidos = []) {
+  if (!Array.isArray(rows)) return null;
+
+  const t = pcvNormalizarTerritorio(territorio);
+
+  return rows.find(r => {
+    const nombre = cleanText(r.Nombre || "");
+    const nombreSinCodigo = pcvNormalizarTerritorio(r.Nombre || "");
+
+    const territorioOk =
+      nombre.includes(t) ||
+      nombreSinCodigo.includes(t) ||
+      nombre.includes(` ${t}.`) ||
+      nombre.includes(` ${t} `) ||
+      nombre.includes(`${t}.`) ||
+      nombre.includes(`${t},`);
+
+    const incluye = patrones.every(p => nombre.includes(cleanText(p)));
+    const excluye = excluidos.some(p => nombre.includes(cleanText(p)));
+
+    return territorioOk && incluye && !excluye;
+  }) || null;
+}
+
+function pcvBuscarSerieMunicipioExacto(rows, municipio, patrones = [], excluidos = []) {
+  if (!Array.isArray(rows)) return null;
+
+  const objetivo = pcvNormalizarTerritorio(municipio);
+
+  return rows.find(r => {
+    const nombre = cleanText(r.Nombre || "");
+    const partes = String(r.Nombre || "")
+      .split(".")
+      .map(p => pcvNormalizarTerritorio(p))
+      .filter(Boolean);
+
+    const primeraParte = partes[0] || "";
+
+    const municipioOk = primeraParte === objetivo;
+
+    const incluye = patrones.every(p => nombre.includes(cleanText(p)));
+    const excluye = excluidos.some(p => nombre.includes(cleanText(p)));
+
+    return municipioOk && incluye && !excluye;
+  }) || null;
+}
 /* =========================================================
    INE · COMPRAVENTAS DE VIVIENDA
 ========================================================= */
