@@ -1103,7 +1103,272 @@ app.get("/api/macro-decision", async (req, res) => {
     res.json(fail("No se pudo generar macrodecisión.", { detalle: e.message }));
   }
 });
+/* =========================================================
+   AMPLIACIÓN SEGURA · DATOS PARA PUNTO CONTROL VENDEDOR
+   NO MODIFICA ENDPOINTS EXISTENTES
+========================================================= */
 
+function pcvVariacion(actual, anterior) {
+  const a = toNumber(actual);
+  const b = toNumber(anterior);
+  if (a === null || b === null || b === 0) return null;
+  return ((a - b) / b) * 100;
+}
+
+function pcvUltimosDos(serie) {
+  if (!serie?.Data || serie.Data.length < 2) return null;
+
+  const actual = serie.Data[0];
+  const anterior = serie.Data[1];
+
+  return {
+    actual: toNumber(actual.Valor),
+    anterior: toNumber(anterior.Valor),
+    fecha_actual: actual.Anyo,
+    periodo_actual: actual.FK_Periodo,
+    fecha_anterior: anterior.Anyo,
+    periodo_anterior: anterior.FK_Periodo,
+    variacion: pcvVariacion(actual.Valor, anterior.Valor)
+  };
+}
+
+function pcvBuscarSerie(rows, patrones = [], excluidos = []) {
+  if (!Array.isArray(rows)) return null;
+
+  return rows.find(r => {
+    const nombre = cleanText(r.Nombre || "");
+    const incluye = patrones.every(p => nombre.includes(cleanText(p)));
+    const excluye = excluidos.some(p => nombre.includes(cleanText(p)));
+    return incluye && !excluye;
+  }) || null;
+}
+
+/* =========================================================
+   INE · COMPRAVENTAS DE VIVIENDA
+========================================================= */
+
+app.get("/api/ine/compraventas", async (req, res) => {
+  try {
+    const territorio = String(req.query.territorio || req.query.provincia || "Total Nacional").trim();
+    const tabla = process.env.INE_COMPRAVENTAS_TABLA || "6150";
+
+    const rows = await ineTablaJson(tabla, 13);
+
+    const serie =
+      pcvBuscarSerie(rows, [territorio, "viviendas"], ["solares"]) ||
+      pcvBuscarSerie(rows, ["total nacional", "viviendas"], ["solares"]);
+
+    if (!serie) {
+      return res.json(ok({
+        fuente: `INE WSTempus · Tabla ${tabla}`,
+        estado_dato: "NO_DISPONIBLE",
+        territorio,
+        aviso: "No se localizó serie de compraventas de viviendas."
+      }));
+    }
+
+    const datos = pcvUltimosDos(serie);
+
+    res.json(ok({
+      fuente: `INE WSTempus · Tabla ${tabla}`,
+      estado_dato: datos ? "OK" : "NO_DISPONIBLE",
+      territorio,
+      indicador: serie.Nombre,
+      actual: datos?.actual ?? null,
+      anterior: datos?.anterior ?? null,
+      variacion: datos?.variacion ?? null,
+      fecha_actual: datos?.fecha_actual ?? null,
+      periodo_actual: datos?.periodo_actual ?? null,
+      fecha_anterior: datos?.fecha_anterior ?? null,
+      periodo_anterior: datos?.periodo_anterior ?? null,
+      lectura:
+        datos?.variacion === null || datos?.variacion === undefined
+          ? "No se puede calcular la evolución."
+          : datos.variacion > 0
+          ? "Las compraventas aumentan. Este dato favorece la posición del vendedor."
+          : datos.variacion >= -5
+          ? "Las compraventas se mantienen relativamente estables."
+          : "Las compraventas retroceden. Puede existir menor presión compradora.",
+      semaforo:
+        datos?.variacion === null || datos?.variacion === undefined
+          ? { color: "gris", nivel: "No disponible" }
+          : datos.variacion > 0
+          ? { color: "verde", nivel: "Favorable al vendedor" }
+          : datos.variacion >= -5
+          ? { color: "naranja", nivel: "Mercado prudente" }
+          : { color: "rojo", nivel: "Favorable al comprador" },
+      aviso: "Dato real INE. Mide actividad de compraventa, no precio de cierre."
+    }));
+  } catch (e) {
+    res.json(ok({
+      fuente: "INE · Compraventas",
+      estado_dato: "NO_DISPONIBLE",
+      aviso: "No se pudieron obtener compraventas.",
+      detalle: e.message
+    }));
+  }
+});
+
+/* =========================================================
+   INE · HIPOTECAS SOBRE VIVIENDAS
+========================================================= */
+
+app.get("/api/ine/hipotecas", async (req, res) => {
+  try {
+    const territorio = String(req.query.territorio || req.query.provincia || "Total Nacional").trim();
+    const tabla = process.env.INE_HIPOTECAS_TABLA || "3200";
+
+    const rows = await ineTablaJson(tabla, 13);
+
+    const serie =
+      pcvBuscarSerie(rows, [territorio, "viviendas"], ["importe"]) ||
+      pcvBuscarSerie(rows, ["total nacional", "viviendas"], ["importe"]);
+
+    if (!serie) {
+      return res.json(ok({
+        fuente: `INE WSTempus · Tabla ${tabla}`,
+        estado_dato: "NO_DISPONIBLE",
+        territorio,
+        aviso: "No se localizó serie de hipotecas sobre viviendas."
+      }));
+    }
+
+    const datos = pcvUltimosDos(serie);
+
+    res.json(ok({
+      fuente: `INE WSTempus · Tabla ${tabla}`,
+      estado_dato: datos ? "OK" : "NO_DISPONIBLE",
+      territorio,
+      indicador: serie.Nombre,
+      actual: datos?.actual ?? null,
+      anterior: datos?.anterior ?? null,
+      variacion: datos?.variacion ?? null,
+      fecha_actual: datos?.fecha_actual ?? null,
+      periodo_actual: datos?.periodo_actual ?? null,
+      fecha_anterior: datos?.fecha_anterior ?? null,
+      periodo_anterior: datos?.periodo_anterior ?? null,
+      lectura:
+        datos?.variacion === null || datos?.variacion === undefined
+          ? "No se puede calcular la evolución."
+          : datos.variacion > 0
+          ? "Aumentan las hipotecas. Puede haber más compradores financiables."
+          : datos.variacion >= -5
+          ? "Las hipotecas se mantienen relativamente estables."
+          : "Caen las hipotecas. Puede reducirse la fuerza compradora.",
+      semaforo:
+        datos?.variacion === null || datos?.variacion === undefined
+          ? { color: "gris", nivel: "No disponible" }
+          : datos.variacion > 0
+          ? { color: "verde", nivel: "Favorece venta" }
+          : datos.variacion >= -5
+          ? { color: "naranja", nivel: "Prudencia" }
+          : { color: "rojo", nivel: "Demanda debilitada" },
+      aviso: "Dato real INE. Refleja financiación hipotecaria inscrita."
+    }));
+  } catch (e) {
+    res.json(ok({
+      fuente: "INE · Hipotecas",
+      estado_dato: "NO_DISPONIBLE",
+      aviso: "No se pudieron obtener hipotecas.",
+      detalle: e.message
+    }));
+  }
+});
+
+/* =========================================================
+   INE · DEMOGRAFÍA MUNICIPAL
+========================================================= */
+
+app.get("/api/ine/demografia", async (req, res) => {
+  try {
+    const municipio = String(req.query.municipio || "").trim();
+    const tabla = process.env.INE_DEMOGRAFIA_TABLA || "29005";
+
+    if (!municipio) {
+      return res.json(ok({
+        fuente: `INE WSTempus · Tabla ${tabla}`,
+        estado_dato: "NO_DISPONIBLE",
+        aviso: "Debe indicarse municipio."
+      }));
+    }
+
+    const rows = await ineTablaJson(tabla, 2);
+
+    const serie =
+      pcvBuscarSerie(rows, [municipio, "total"]) ||
+      pcvBuscarSerie(rows, [municipio]);
+
+    if (!serie) {
+      return res.json(ok({
+        fuente: `INE WSTempus · Tabla ${tabla}`,
+        estado_dato: "NO_DISPONIBLE",
+        municipio,
+        aviso: "No se localizó población municipal."
+      }));
+    }
+
+    const datos = pcvUltimosDos(serie);
+
+    res.json(ok({
+      fuente: `INE WSTempus · Tabla ${tabla}`,
+      estado_dato: datos ? "OK" : "NO_DISPONIBLE",
+      municipio,
+      indicador: serie.Nombre,
+      poblacion_actual: datos?.actual ?? null,
+      poblacion_anterior: datos?.anterior ?? null,
+      variacion: datos?.variacion ?? null,
+      fecha_actual: datos?.fecha_actual ?? null,
+      fecha_anterior: datos?.fecha_anterior ?? null,
+      lectura:
+        datos?.variacion === null || datos?.variacion === undefined
+          ? "No se puede calcular evolución demográfica."
+          : datos.variacion > 0
+          ? "El municipio gana población. Puede favorecer demanda residencial."
+          : datos.variacion === 0
+          ? "Población estable."
+          : "El municipio pierde población. Puede limitar la demanda futura.",
+      semaforo:
+        datos?.variacion === null || datos?.variacion === undefined
+          ? { color: "gris", nivel: "No disponible" }
+          : datos.variacion > 0
+          ? { color: "verde", nivel: "Favorable" }
+          : datos.variacion >= -1
+          ? { color: "naranja", nivel: "Estable / prudente" }
+          : { color: "rojo", nivel: "Desfavorable" },
+      aviso: "Dato real INE de población municipal."
+    }));
+  } catch (e) {
+    res.json(ok({
+      fuente: "INE · Demografía municipal",
+      estado_dato: "NO_DISPONIBLE",
+      aviso: "No se pudo obtener demografía municipal.",
+      detalle: e.message
+    }));
+  }
+});
+
+/* =========================================================
+   INE · IRAV ALQUILER
+========================================================= */
+
+app.get("/api/ine/irav", async (req, res) => {
+  try {
+    res.json(ok({
+      fuente: "INE · Índice de Referencia de Arrendamientos de Vivienda",
+      estado_dato: "NO_DISPONIBLE",
+      valor: null,
+      semaforo: { color: "gris", nivel: "No disponible" },
+      aviso: "Endpoint preparado. Pendiente de conectar a una URL estructurada estable del INE para evitar lecturas frágiles desde HTML."
+    }));
+  } catch (e) {
+    res.json(ok({
+      fuente: "INE · IRAV",
+      estado_dato: "NO_DISPONIBLE",
+      aviso: "No se pudo obtener IRAV.",
+      detalle: e.message
+    }));
+  }
+});
 app.listen(PORT, () => {
   console.log(`Servidor activo en puerto ${PORT}`);
 });
