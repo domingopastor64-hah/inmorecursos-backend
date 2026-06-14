@@ -1197,48 +1197,103 @@ function pcvPuntosSemaforo(endpoint) {
 
 /* =========================================================
    INE · COMPRAVENTAS
+   Tabla 6150 · Compraventa de viviendas según régimen y estado
 ========================================================= */
 
 app.get("/api/ine/compraventas", async (req, res) => {
   try {
-    const territorio = String(req.query.territorio || req.query.provincia || "Total Nacional").trim();
+    const territorioOriginal = String(req.query.territorio || req.query.provincia || "Total Nacional").trim();
     const tabla = process.env.INE_COMPRAVENTAS_TABLA || "6150";
 
     const rows = await ineTablaJson(tabla, 13);
-    const target = cleanText(territorio).replace(/^\d+\s+/, "");
 
-    const serie =
-      rows.find(r => {
-        const n = cleanText(r.Nombre || "");
-        return n.includes(target) &&
-               n.includes("viviendas") &&
-               !n.includes("solares") &&
-               !n.includes("rusticas");
-      }) ||
-      rows.find(r => {
-        const n = cleanText(r.Nombre || "");
-        return n.includes("total nacional") &&
-               n.includes("viviendas") &&
-               !n.includes("solares") &&
-               !n.includes("rusticas");
-      });
+    function normalizarCompraventas(v = "") {
+      return cleanText(v)
+        .replace(/^\d+\s+/, "")
+        .replace(/[.,;:()/-]/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+    }
 
-    if (!serie) {
+    function esTerritorioBuscado(nombreSerie, territorio) {
+      const n = normalizarCompraventas(nombreSerie);
+      const t = normalizarCompraventas(territorio);
+
+      if (!t || t === "espana" || t === "españa" || t === "total nacional" || t === "nacional") {
+        return n.includes("total nacional");
+      }
+
+      return (
+        n.includes(t) ||
+        n.includes(`10 ${t}`) ||
+        n.endsWith(` ${t}`) ||
+        n.startsWith(`${t} `)
+      );
+    }
+
+    function puntuarSerie(nombreSerie, territorio) {
+      const n = normalizarCompraventas(nombreSerie);
+      let puntos = 0;
+
+      if (esTerritorioBuscado(nombreSerie, territorio)) puntos += 100;
+
+      if (n.includes("vivienda")) puntos += 40;
+      if (n.includes("viviendas")) puntos += 40;
+      if (n.includes("compraventa")) puntos += 30;
+
+      if (n.includes("total")) puntos += 25;
+      if (n.includes("mensual")) puntos += 10;
+
+      if (n.includes("solares")) puntos -= 100;
+      if (n.includes("rusticas")) puntos -= 100;
+      if (n.includes("fincas rusticas")) puntos -= 100;
+      if (n.includes("fincas urbanas")) puntos -= 40;
+
+      if (n.includes("protegida")) puntos -= 15;
+      if (n.includes("libre")) puntos -= 8;
+      if (n.includes("nueva")) puntos -= 8;
+      if (n.includes("segunda mano")) puntos -= 8;
+      if (n.includes("usada")) puntos -= 8;
+
+      return puntos;
+    }
+
+    const candidatos = rows
+      .filter(r => r?.Nombre)
+      .map(r => ({
+        serie: r,
+        nombre: r.Nombre,
+        nombre_limpio: normalizarCompraventas(r.Nombre),
+        puntos: puntuarSerie(r.Nombre, territorioOriginal)
+      }))
+      .filter(x => x.puntos > 0)
+      .sort((a, b) => b.puntos - a.puntos);
+
+    const elegido = candidatos[0]?.serie || null;
+
+    if (!elegido) {
+      const muestra = rows
+        .filter(r => r?.Nombre)
+        .slice(0, 25)
+        .map(r => r.Nombre);
+
       return res.json(ok({
         fuente: `INE WSTempus · Tabla ${tabla}`,
         estado_dato: "NO_DISPONIBLE",
-        territorio,
-        aviso: "No se localizó serie de compraventas de viviendas."
+        territorio: territorioOriginal,
+        aviso: "No se localizó serie de compraventas de viviendas. Se devuelve muestra de nombres reales para depuración.",
+        muestra_series: muestra
       }));
     }
 
-    const datos = pcvUltimosDos(serie);
+    const datos = pcvUltimosDos(elegido);
 
     res.json(ok({
       fuente: `INE WSTempus · Tabla ${tabla}`,
       estado_dato: datos ? "OK" : "NO_DISPONIBLE",
-      territorio,
-      indicador: serie.Nombre,
+      territorio: territorioOriginal,
+      indicador: elegido.Nombre,
+      puntuacion_selector: candidatos[0]?.puntos ?? null,
       actual: datos?.actual ?? null,
       anterior: datos?.anterior ?? null,
       variacion: datos?.variacion ?? null,
@@ -1262,7 +1317,13 @@ app.get("/api/ine/compraventas", async (req, res) => {
           : datos.variacion >= -5
           ? { color: "naranja", nivel: "Mercado prudente" }
           : { color: "rojo", nivel: "Favorable al comprador" },
-      aviso: "Dato real INE. Mide actividad de compraventa, no precio de cierre."
+      aviso: "Dato real INE. Mide actividad de compraventa, no precio de cierre.",
+      debug_selector: {
+        mejores_candidatos: candidatos.slice(0, 8).map(x => ({
+          nombre: x.nombre,
+          puntos: x.puntos
+        }))
+      }
     }));
   } catch (e) {
     res.json(ok({
@@ -1273,7 +1334,6 @@ app.get("/api/ine/compraventas", async (req, res) => {
     }));
   }
 });
-
 /* =========================================================
    INE · HIPOTECAS
 ========================================================= */
