@@ -490,7 +490,6 @@ app.get("/api/servicios", async (req, res) => {
     }));
   }
 });
-
 /* =========================================================
    MIVAU · VALOR TASADO
 ========================================================= */
@@ -1035,7 +1034,6 @@ app.get("/api/contexto-economico", async (req, res) => {
     res.json(fail("No se pudo generar contexto económico.", { detalle: e.message }));
   }
 });
-
 /* =========================================================
    MACRODECISIÓN
 ========================================================= */
@@ -1103,10 +1101,24 @@ app.get("/api/macro-decision", async (req, res) => {
     res.json(fail("No se pudo generar macrodecisión.", { detalle: e.message }));
   }
 });
+
 /* =========================================================
-   AMPLIACIÓN SEGURA · DATOS PARA PUNTO CONTROL VENDEDOR
+   AMPLIACIÓN SEGURA · PUNTO CONTROL VENDEDOR
    NO MODIFICA ENDPOINTS EXISTENTES
 ========================================================= */
+
+async function pcvSafeGet(url) {
+  try {
+    const r = await http.get(url);
+    return r.data;
+  } catch (e) {
+    return null;
+  }
+}
+
+function pcvOkDato(endpoint) {
+  return endpoint && endpoint.estado_dato === "OK";
+}
 
 function pcvVariacion(actual, anterior) {
   const a = toNumber(actual);
@@ -1137,22 +1149,6 @@ function pcvNormalizarTerritorio(v = "") {
     .replace(/^\d+\s+/, "")
     .replace(/\s+/g, " ")
     .trim();
-}
-
-function pcvSerieIncluyeTerritorio(nombreSerie = "", territorio = "") {
-  const nombre = cleanText(nombreSerie);
-  const t = pcvNormalizarTerritorio(territorio);
-
-  if (!t) return true;
-
-  return (
-    nombre.includes(t) ||
-    nombre.includes(` ${t}.`) ||
-    nombre.includes(` ${t} `) ||
-    nombre.includes(`${t}.`) ||
-    nombre.includes(`${t},`) ||
-    nombre.includes(`${t} `)
-  );
 }
 
 function pcvBuscarSerie(rows, patrones = [], excluidos = []) {
@@ -1203,7 +1199,6 @@ function pcvBuscarSerieMunicipioExacto(rows, municipio, patrones = [], excluidos
       .filter(Boolean);
 
     const primeraParte = partes[0] || "";
-
     const municipioOk = primeraParte === objetivo;
 
     const incluye = patrones.every(p => nombre.includes(cleanText(p)));
@@ -1212,6 +1207,15 @@ function pcvBuscarSerieMunicipioExacto(rows, municipio, patrones = [], excluidos
     return municipioOk && incluye && !excluye;
   }) || null;
 }
+
+function pcvPuntosSemaforo(endpoint) {
+  const color = endpoint?.semaforo?.color;
+  if (color === "verde") return 10;
+  if (color === "naranja") return 3;
+  if (color === "rojo") return -10;
+  return 0;
+}
+
 /* =========================================================
    INE · COMPRAVENTAS DE VIVIENDA
 ========================================================= */
@@ -1224,8 +1228,12 @@ app.get("/api/ine/compraventas", async (req, res) => {
     const rows = await ineTablaJson(tabla, 13);
 
     const serie =
-      pcvBuscarSerie(rows, [territorio, "viviendas"], ["solares"]) ||
-      pcvBuscarSerie(rows, ["total nacional", "viviendas"], ["solares"]);
+      pcvBuscarSerieTerritorio(rows, territorio, ["viviendas: total"], ["solares"]) ||
+      pcvBuscarSerieTerritorio(rows, territorio, ["viviendas", "total"], ["solares"]) ||
+      pcvBuscarSerieTerritorio(rows, territorio, ["viviendas"], ["solares"]) ||
+      pcvBuscarSerieTerritorio(rows, `10 ${territorio}`, ["viviendas: total"], ["solares"]) ||
+      pcvBuscarSerie(rows, ["total nacional", "viviendas: total"], ["solares"]) ||
+      pcvBuscarSerie(rows, ["total nacional", "viviendas", "total"], ["solares"]);
 
     if (!serie) {
       return res.json(ok({
@@ -1290,7 +1298,9 @@ app.get("/api/ine/hipotecas", async (req, res) => {
     const rows = await ineTablaJson(tabla, 13);
 
     const serie =
-      pcvBuscarSerie(rows, [territorio, "viviendas"], ["importe"]) ||
+      pcvBuscarSerieTerritorio(rows, territorio, ["viviendas", "numero"], ["importe"]) ||
+      pcvBuscarSerieTerritorio(rows, territorio, ["viviendas"], ["importe"]) ||
+      pcvBuscarSerie(rows, ["total nacional", "viviendas", "numero"], ["importe"]) ||
       pcvBuscarSerie(rows, ["total nacional", "viviendas"], ["importe"]);
 
     if (!serie) {
@@ -1364,8 +1374,9 @@ app.get("/api/ine/demografia", async (req, res) => {
     const rows = await ineTablaJson(tabla, 2);
 
     const serie =
-      pcvBuscarSerie(rows, [municipio, "total"]) ||
-      pcvBuscarSerie(rows, [municipio]);
+      pcvBuscarSerieMunicipioExacto(rows, municipio, ["total habitantes"]) ||
+      pcvBuscarSerieMunicipioExacto(rows, municipio, ["total"]) ||
+      pcvBuscarSerieMunicipioExacto(rows, municipio);
 
     if (!serie) {
       return res.json(ok({
@@ -1438,6 +1449,249 @@ app.get("/api/ine/irav", async (req, res) => {
     }));
   }
 });
+
+/* =========================================================
+   MOTOR DE LECTURA VENDEDOR
+========================================================= */
+
+function pcvGenerarOpinionVendedor({ macro, compraventas, hipotecas, demografia, mivau, servicios, entorno }) {
+  const datos = [];
+  let score = 50;
+
+  function add(nombre, valor, lectura, puntos, fuente) {
+    if (valor === null || valor === undefined || valor === "No disponible") return;
+    score += puntos;
+    datos.push({ nombre, valor, lectura, puntos, fuente });
+  }
+
+  const bce = macro?.bce?.tipos?.operaciones_principales?.valor ?? null;
+  if (bce !== null) {
+    add(
+      "Tipos oficiales BCE",
+      `${bce}%`,
+      bce <= 2.5 ? "Tipos moderados: mejoran la capacidad compradora." :
+      bce <= 4 ? "Tipos sensibles: obligan a ajustar precio y expectativas." :
+      "Tipos elevados: reducen capacidad de compra.",
+      bce <= 2.5 ? 8 : bce <= 4 ? 2 : -8,
+      macro?.bce?.fuente
+    );
+  }
+
+  const ipc = macro?.ipc?.valor ?? null;
+  if (ipc !== null) {
+    add(
+      "IPC anual",
+      `${Number(ipc).toFixed(2)}%`,
+      ipc <= 2.5 ? "Inflación contenida: favorece estabilidad." :
+      ipc <= 4 ? "Inflación moderada: puede presionar renta disponible." :
+      "Inflación elevada: reduce margen de compra.",
+      ipc <= 2.5 ? 6 : ipc <= 4 ? 1 : -6,
+      macro?.ipc?.fuente
+    );
+  }
+
+  const pib = macro?.pib?.variacion_anual ?? macro?.pib?.valor ?? null;
+  if (pib !== null) {
+    add(
+      "PIB variación anual",
+      `${Number(pib).toFixed(2)}%`,
+      pib > 2 ? "Economía expansiva: favorece actividad." :
+      pib >= 0 ? "Crecimiento moderado." :
+      "Desaceleración: prudencia.",
+      pib > 2 ? 6 : pib >= 0 ? 2 : -6,
+      macro?.pib?.fuente
+    );
+  }
+
+  const paroProv = macro?.paro_provincia?.valor ?? null;
+  if (paroProv !== null) {
+    add(
+      "Paro provincial",
+      `${Number(paroProv).toFixed(2)}%`,
+      paroProv <= 8 ? "Mercado laboral sólido." :
+      paroProv <= 14 ? "Mercado laboral sensible." :
+      "Paro elevado: limita compradores solventes.",
+      paroProv <= 8 ? 8 : paroProv <= 14 ? 1 : -8,
+      macro?.paro_provincia?.fuente
+    );
+  }
+
+  if (pcvOkDato(compraventas)) {
+    add(
+      "Compraventas de vivienda",
+      `${compraventas.actual} viviendas · ${compraventas.variacion > 0 ? "+" : ""}${Number(compraventas.variacion).toFixed(2)}%`,
+      compraventas.lectura,
+      pcvPuntosSemaforo(compraventas),
+      compraventas.fuente
+    );
+  }
+
+  if (pcvOkDato(hipotecas)) {
+    add(
+      "Hipotecas sobre viviendas",
+      `${hipotecas.actual} hipotecas · ${hipotecas.variacion > 0 ? "+" : ""}${Number(hipotecas.variacion).toFixed(2)}%`,
+      hipotecas.lectura,
+      pcvPuntosSemaforo(hipotecas),
+      hipotecas.fuente
+    );
+  }
+
+  if (pcvOkDato(demografia)) {
+    add(
+      "Demografía municipal",
+      `${demografia.poblacion_actual} habitantes · ${demografia.variacion > 0 ? "+" : ""}${Number(demografia.variacion).toFixed(2)}%`,
+      demografia.lectura,
+      pcvPuntosSemaforo(demografia),
+      demografia.fuente
+    );
+  }
+
+  const mivauValor = mivau?.ultimo?.valor_tasado_total ?? null;
+  if (mivauValor !== null) {
+    add(
+      "Valor tasado MIVAU",
+      `${Number(mivauValor).toFixed(0)} €/m²`,
+      "Referencia oficial útil para contextualizar el precio, no como precio exacto de cierre.",
+      4,
+      mivau?.fuente
+    );
+  }
+
+  const puntosServicios = servicios?.puntuacion_servicios ?? null;
+  if (puntosServicios !== null) {
+    add(
+      "Servicios cercanos",
+      `${puntosServicios}/100`,
+      servicios.lectura,
+      puntosServicios >= 70 ? 8 : puntosServicios >= 40 ? 2 : -6,
+      servicios.fuente
+    );
+  }
+
+  const aire = entorno?.lectura_entorno?.puntuacion_aire ?? null;
+  if (aire !== null) {
+    add(
+      "Calidad ambiental",
+      `${aire}/100`,
+      entorno?.lectura_entorno?.lectura || "Dato ambiental disponible.",
+      aire >= 70 ? 3 : aire >= 45 ? 1 : -3,
+      entorno.fuente
+    );
+  }
+
+  score = Math.max(0, Math.min(100, Math.round(score)));
+
+  let opinion = "No hay datos suficientes para emitir una opinión de mercado.";
+  let resumen = "La herramienta no inventa datos. Si faltan indicadores reales, no fuerza una conclusión.";
+
+  if (datos.length >= 5) {
+    if (score >= 70) {
+      opinion = "Momento favorable al vendedor";
+      resumen = "Los datos muestran actividad de mercado, capacidad compradora razonable y un contexto suficiente para salir a vender con una estrategia de precio bien justificada.";
+    } else if (score >= 45) {
+      opinion = "Mercado equilibrado";
+      resumen = "No hay una ventaja clara para vendedor o comprador. La operación dependerá mucho del precio de salida, la presentación y la competencia real.";
+    } else {
+      opinion = "Momento más favorable al comprador";
+      resumen = "Los datos aconsejan prudencia: puede haber menor fuerza compradora o más presión negociadora sobre el precio.";
+    }
+  }
+
+  return {
+    score,
+    opinion,
+    resumen,
+    datos_usados: datos,
+    datos_suficientes: datos.length >= 5
+  };
+}
+
+/* =========================================================
+   API AGRUPADA · PUNTO CONTROL VENDEDOR
+========================================================= */
+
+app.get("/api/punto-control-vendedor", async (req, res) => {
+  try {
+    const direccion = String(req.query.direccion || "").trim();
+    const radio = Number(req.query.radio || 1000);
+
+    if (!direccion) {
+      return res.json(ok({
+        fuente: "Punto Control Vendedor · InmoRecursos",
+        estado_dato: "NO_DISPONIBLE",
+        aviso: "Debe indicarse una dirección."
+      }));
+    }
+
+    const host = `${req.protocol}://${req.get("host")}`;
+
+    const geo = await pcvSafeGet(`${host}/api/geo?direccion=${encodeURIComponent(direccion)}`);
+    const geocoding = geo?.geocoding || null;
+
+    const municipio = geocoding?.municipio || geocoding?.nombre || null;
+    const provincia = geocoding?.provincia || geocoding?.county || null;
+
+    const [
+      servicios,
+      entorno,
+      mivau,
+      renta,
+      macro,
+      compraventas,
+      hipotecas,
+      demografia,
+      irav
+    ] = await Promise.all([
+      pcvSafeGet(`${host}/api/servicios?direccion=${encodeURIComponent(direccion)}&radio=${radio}`),
+      pcvSafeGet(`${host}/api/entorno?direccion=${encodeURIComponent(direccion)}`),
+      municipio ? pcvSafeGet(`${host}/api/mivau/valor-tasado?municipio=${encodeURIComponent(municipio)}`) : null,
+      municipio ? pcvSafeGet(`${host}/api/ine/renta?municipio=${encodeURIComponent(municipio)}`) : null,
+      pcvSafeGet(`${host}/api/contexto-economico`),
+      provincia ? pcvSafeGet(`${host}/api/ine/compraventas?territorio=${encodeURIComponent(provincia)}`) : pcvSafeGet(`${host}/api/ine/compraventas`),
+      provincia ? pcvSafeGet(`${host}/api/ine/hipotecas?territorio=${encodeURIComponent(provincia)}`) : pcvSafeGet(`${host}/api/ine/hipotecas`),
+      municipio ? pcvSafeGet(`${host}/api/ine/demografia?municipio=${encodeURIComponent(municipio)}`) : null,
+      pcvSafeGet(`${host}/api/ine/irav`)
+    ]);
+
+    const opinion = pcvGenerarOpinionVendedor({
+      macro,
+      compraventas,
+      hipotecas,
+      demografia,
+      mivau,
+      servicios,
+      entorno
+    });
+
+    res.json(ok({
+      fuente: "Punto Control Vendedor · InmoRecursos",
+      estado_dato: "OK",
+      direccion_solicitada: direccion,
+      municipio,
+      provincia,
+      geocoding,
+      opinion_mercado: opinion,
+      datos_reales: {
+        macro,
+        compraventas,
+        hipotecas,
+        demografia,
+        mivau,
+        renta,
+        servicios,
+        entorno,
+        irav
+      },
+      aviso_consumidor:
+        "La opinión se genera sólo con datos reales devueltos por las APIs. Los datos no disponibles no se inventan ni se usan para justificar la conclusión."
+    }));
+  } catch (e) {
+    res.json(fail("No se pudo generar Punto Control Vendedor.", {
+      detalle: e.message
+    }));
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`Servidor activo en puerto ${PORT}`);
 });
