@@ -1237,23 +1237,20 @@ app.get("/api/ine/compraventas", async (req, res) => {
 
       if (esTerritorioBuscado(nombreSerie, territorio)) puntos += 100;
 
-      if (n.includes("vivienda")) puntos += 40;
-      if (n.includes("viviendas")) puntos += 40;
-      if (n.includes("compraventa")) puntos += 30;
+      if (n.includes("general")) puntos += 90;
+if (n.includes("compraventa")) puntos += 40;
+if (n.includes("numero")) puntos += 30;
 
-      if (n.includes("total")) puntos += 25;
-      if (n.includes("mensual")) puntos += 10;
+if (n.includes("vivienda nueva")) puntos -= 70;
+if (n.includes("segunda mano")) puntos -= 70;
+if (n.includes("vivienda libre")) puntos -= 60;
+if (n.includes("vivienda protegida")) puntos -= 60;
+if (n.includes("nueva")) puntos -= 50;
+if (n.includes("libre")) puntos -= 40;
+if (n.includes("protegida")) puntos -= 40;
 
-      if (n.includes("solares")) puntos -= 100;
-      if (n.includes("rusticas")) puntos -= 100;
-      if (n.includes("fincas rusticas")) puntos -= 100;
-      if (n.includes("fincas urbanas")) puntos -= 40;
-
-      if (n.includes("protegida")) puntos -= 15;
-      if (n.includes("libre")) puntos -= 8;
-      if (n.includes("nueva")) puntos -= 8;
-      if (n.includes("segunda mano")) puntos -= 8;
-      if (n.includes("usada")) puntos -= 8;
+if (n.includes("total")) puntos += 20;
+if (n.includes("mensual")) puntos += 10;
 
       return puntos;
     }
