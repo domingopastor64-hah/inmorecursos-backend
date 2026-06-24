@@ -118,7 +118,8 @@ app.get("/", (req, res) => {
       "/api/ine/hipotecas?territorio=Cáceres",
       "/api/ine/demografia?municipio=Plasencia",
       "/api/ine/irav",
-      "/api/punto-control-vendedor?direccion=Plasencia,%20Cáceres,%20España"
+      "/api/punto-control-vendedor?direccion=Plasencia,%20Cáceres,%20España",
+      "/api/punto-control-hipoteca/contexto?direccion=Plasencia,%20Cáceres,%20España"
     ]
   }));
 });
@@ -892,6 +893,7 @@ app.get("/api/ine/pib", async (req, res) => {
     }));
   }
 });
+
 /* =========================================================
    INE · PARO
 ========================================================= */
@@ -1001,7 +1003,6 @@ app.get("/api/ine/salarios", async (req, res) => {
     }));
   }
 });
-
 /* =========================================================
    CIS · ICC
 ========================================================= */
@@ -1238,19 +1239,19 @@ app.get("/api/ine/compraventas", async (req, res) => {
       if (esTerritorioBuscado(nombreSerie, territorio)) puntos += 100;
 
       if (n.includes("general")) puntos += 90;
-if (n.includes("compraventa")) puntos += 40;
-if (n.includes("numero")) puntos += 30;
+      if (n.includes("compraventa")) puntos += 40;
+      if (n.includes("numero")) puntos += 30;
 
-if (n.includes("vivienda nueva")) puntos -= 70;
-if (n.includes("segunda mano")) puntos -= 70;
-if (n.includes("vivienda libre")) puntos -= 60;
-if (n.includes("vivienda protegida")) puntos -= 60;
-if (n.includes("nueva")) puntos -= 50;
-if (n.includes("libre")) puntos -= 40;
-if (n.includes("protegida")) puntos -= 40;
+      if (n.includes("vivienda nueva")) puntos -= 70;
+      if (n.includes("segunda mano")) puntos -= 70;
+      if (n.includes("vivienda libre")) puntos -= 60;
+      if (n.includes("vivienda protegida")) puntos -= 60;
+      if (n.includes("nueva")) puntos -= 50;
+      if (n.includes("libre")) puntos -= 40;
+      if (n.includes("protegida")) puntos -= 40;
 
-if (n.includes("total")) puntos += 20;
-if (n.includes("mensual")) puntos += 10;
+      if (n.includes("total")) puntos += 20;
+      if (n.includes("mensual")) puntos += 10;
 
       return puntos;
     }
@@ -1331,6 +1332,7 @@ if (n.includes("mensual")) puntos += 10;
     }));
   }
 });
+
 /* =========================================================
    INE · HIPOTECAS
 ========================================================= */
@@ -1499,36 +1501,126 @@ function pcvGenerarOpinionVendedor({ macro, compraventas, hipotecas, demografia,
 
   const bce = macro?.bce?.tipos?.operaciones_principales?.valor ?? null;
   if (bce !== null) {
-    add("Tipos oficiales BCE", `${bce}%`, bce <= 2.5 ? "Tipos moderados: mejoran la capacidad compradora." : bce <= 4 ? "Tipos sensibles: obligan a ajustar precio y expectativas." : "Tipos elevados: reducen capacidad de compra.", bce <= 2.5 ? 8 : bce <= 4 ? 2 : -8, macro?.bce?.fuente);
+    add(
+      "Tipos oficiales BCE",
+      `${bce}%`,
+      bce <= 2.5
+        ? "Tipos moderados: mejoran la capacidad compradora."
+        : bce <= 4
+        ? "Tipos sensibles: obligan a ajustar precio y expectativas."
+        : "Tipos elevados: reducen capacidad de compra.",
+      bce <= 2.5 ? 8 : bce <= 4 ? 2 : -8,
+      macro?.bce?.fuente
+    );
   }
 
   const ipc = macro?.ipc?.valor ?? null;
   if (ipc !== null) {
-    add("IPC anual", `${Number(ipc).toFixed(2)}%`, ipc <= 2.5 ? "Inflación contenida: favorece estabilidad." : ipc <= 4 ? "Inflación moderada: puede presionar renta disponible." : "Inflación elevada: reduce margen de compra.", ipc <= 2.5 ? 6 : ipc <= 4 ? 1 : -6, macro?.ipc?.fuente);
+    add(
+      "IPC anual",
+      `${Number(ipc).toFixed(2)}%`,
+      ipc <= 2.5
+        ? "Inflación contenida: favorece estabilidad."
+        : ipc <= 4
+        ? "Inflación moderada: puede presionar renta disponible."
+        : "Inflación elevada: reduce margen de compra.",
+      ipc <= 2.5 ? 6 : ipc <= 4 ? 1 : -6,
+      macro?.ipc?.fuente
+    );
   }
 
   const pib = macro?.pib?.variacion_anual ?? macro?.pib?.valor ?? null;
   if (pib !== null) {
-    add("PIB variación anual", `${Number(pib).toFixed(2)}%`, pib > 2 ? "Economía expansiva: favorece actividad." : pib >= 0 ? "Crecimiento moderado." : "Desaceleración: prudencia.", pib > 2 ? 6 : pib >= 0 ? 2 : -6, macro?.pib?.fuente);
+    add(
+      "PIB variación anual",
+      `${Number(pib).toFixed(2)}%`,
+      pib > 2
+        ? "Economía expansiva: favorece actividad."
+        : pib >= 0
+        ? "Crecimiento moderado."
+        : "Desaceleración: prudencia.",
+      pib > 2 ? 6 : pib >= 0 ? 2 : -6,
+      macro?.pib?.fuente
+    );
   }
 
   const paroProv = macro?.paro_provincia?.valor ?? null;
   if (paroProv !== null) {
-    add("Paro provincial", `${Number(paroProv).toFixed(2)}%`, paroProv <= 8 ? "Mercado laboral sólido." : paroProv <= 14 ? "Mercado laboral sensible." : "Paro elevado: limita compradores solventes.", paroProv <= 8 ? 8 : paroProv <= 14 ? 1 : -8, macro?.paro_provincia?.fuente);
+    add(
+      "Paro provincial",
+      `${Number(paroProv).toFixed(2)}%`,
+      paroProv <= 8
+        ? "Mercado laboral sólido."
+        : paroProv <= 14
+        ? "Mercado laboral sensible."
+        : "Paro elevado: limita compradores solventes.",
+      paroProv <= 8 ? 8 : paroProv <= 14 ? 1 : -8,
+      macro?.paro_provincia?.fuente
+    );
   }
 
-  if (pcvOkDato(compraventas)) add("Compraventas de vivienda", `${compraventas.actual} viviendas · ${compraventas.variacion > 0 ? "+" : ""}${Number(compraventas.variacion).toFixed(2)}%`, compraventas.lectura, pcvPuntosSemaforo(compraventas), compraventas.fuente);
-  if (pcvOkDato(hipotecas)) add("Hipotecas sobre viviendas", `${hipotecas.actual} hipotecas · ${hipotecas.variacion > 0 ? "+" : ""}${Number(hipotecas.variacion).toFixed(2)}%`, hipotecas.lectura, pcvPuntosSemaforo(hipotecas), hipotecas.fuente);
-  if (pcvOkDato(demografia)) add("Demografía municipal", `${demografia.poblacion_actual} habitantes · ${demografia.variacion > 0 ? "+" : ""}${Number(demografia.variacion).toFixed(2)}%`, demografia.lectura, pcvPuntosSemaforo(demografia), demografia.fuente);
+  if (pcvOkDato(compraventas)) {
+    add(
+      "Compraventas de vivienda",
+      `${compraventas.actual} viviendas · ${compraventas.variacion > 0 ? "+" : ""}${Number(compraventas.variacion).toFixed(2)}%`,
+      compraventas.lectura,
+      pcvPuntosSemaforo(compraventas),
+      compraventas.fuente
+    );
+  }
+
+  if (pcvOkDato(hipotecas)) {
+    add(
+      "Hipotecas sobre viviendas",
+      `${hipotecas.actual} hipotecas · ${hipotecas.variacion > 0 ? "+" : ""}${Number(hipotecas.variacion).toFixed(2)}%`,
+      hipotecas.lectura,
+      pcvPuntosSemaforo(hipotecas),
+      hipotecas.fuente
+    );
+  }
+
+  if (pcvOkDato(demografia)) {
+    add(
+      "Demografía municipal",
+      `${demografia.poblacion_actual} habitantes · ${demografia.variacion > 0 ? "+" : ""}${Number(demografia.variacion).toFixed(2)}%`,
+      demografia.lectura,
+      pcvPuntosSemaforo(demografia),
+      demografia.fuente
+    );
+  }
 
   const mivauValor = mivau?.ultimo?.valor_tasado_total ?? null;
-  if (mivauValor !== null) add("Valor tasado MIVAU", `${Number(mivauValor).toFixed(0)} €/m²`, "Referencia oficial útil para contextualizar el precio, no como precio exacto de cierre.", 4, mivau?.fuente);
+  if (mivauValor !== null) {
+    add(
+      "Valor tasado MIVAU",
+      `${Number(mivauValor).toFixed(0)} €/m²`,
+      "Referencia oficial útil para contextualizar el precio, no como precio exacto de cierre.",
+      4,
+      mivau?.fuente
+    );
+  }
 
   const puntosServicios = servicios?.puntuacion_servicios ?? null;
-  if (puntosServicios !== null) add("Servicios cercanos", `${puntosServicios}/100`, servicios.lectura, puntosServicios >= 70 ? 8 : puntosServicios >= 40 ? 2 : -6, servicios.fuente);
+  if (puntosServicios !== null) {
+    add(
+      "Servicios cercanos",
+      `${puntosServicios}/100`,
+      servicios.lectura,
+      puntosServicios >= 70 ? 8 : puntosServicios >= 40 ? 2 : -6,
+      servicios.fuente
+    );
+  }
 
   const aire = entorno?.lectura_entorno?.puntuacion_aire ?? null;
-  if (aire !== null) add("Calidad ambiental", `${aire}/100`, entorno?.lectura_entorno?.lectura || "Dato ambiental disponible.", aire >= 70 ? 3 : aire >= 45 ? 1 : -3, entorno.fuente);
+  if (aire !== null) {
+    add(
+      "Calidad ambiental",
+      `${aire}/100`,
+      entorno?.lectura_entorno?.lectura || "Dato ambiental disponible.",
+      aire >= 70 ? 3 : aire >= 45 ? 1 : -3,
+      entorno.fuente
+    );
+  }
 
   score = Math.max(0, Math.min(100, Math.round(score)));
 
@@ -1548,7 +1640,13 @@ function pcvGenerarOpinionVendedor({ macro, compraventas, hipotecas, demografia,
     }
   }
 
-  return { score, opinion, resumen, datos_usados: datos, datos_suficientes: datos.length >= 5 };
+  return {
+    score,
+    opinion,
+    resumen,
+    datos_usados: datos,
+    datos_suficientes: datos.length >= 5
+  };
 }
 
 app.get("/api/punto-control-vendedor", async (req, res) => {
@@ -1583,7 +1681,15 @@ app.get("/api/punto-control-vendedor", async (req, res) => {
       pcvSafeGet(`${host}/api/ine/irav`)
     ]);
 
-    const opinion = pcvGenerarOpinionVendedor({ macro, compraventas, hipotecas, demografia, mivau, servicios, entorno });
+    const opinion = pcvGenerarOpinionVendedor({
+      macro,
+      compraventas,
+      hipotecas,
+      demografia,
+      mivau,
+      servicios,
+      entorno
+    });
 
     res.json(ok({
       fuente: "Punto Control Vendedor · InmoRecursos",
@@ -1593,11 +1699,321 @@ app.get("/api/punto-control-vendedor", async (req, res) => {
       provincia,
       geocoding,
       opinion_mercado: opinion,
-      datos_reales: { macro, compraventas, hipotecas, demografia, mivau, renta, servicios, entorno, irav },
+      datos_reales: {
+        macro,
+        compraventas,
+        hipotecas,
+        demografia,
+        mivau,
+        renta,
+        servicios,
+        entorno,
+        irav
+      },
       aviso_consumidor: "La opinión se genera sólo con datos reales devueltos por las APIs. Los datos no disponibles no se inventan ni se usan para justificar la conclusión."
     }));
   } catch (e) {
     res.json(fail("No se pudo generar Punto Control Vendedor.", { detalle: e.message }));
+  }
+});
+
+/* =========================================================
+   PUNTO CONTROL HIPOTECA · CONTEXTO MACRO
+   BLOQUE ADITIVO
+   NO MODIFICA COMPRADOR NI VENDEDOR
+========================================================= */
+
+function pchLecturaTipoBCE(valor) {
+  const n = toNumber(valor);
+
+  if (n === null) {
+    return "No disponible.";
+  }
+
+  if (n <= 2.5) {
+    return "Tipos oficiales moderados. El contexto financiero resulta más favorable para financiar una vivienda.";
+  }
+
+  if (n <= 4) {
+    return "Tipos oficiales intermedios. Conviene vigilar cuota, plazo y capacidad de ahorro.";
+  }
+
+  return "Tipos oficiales elevados. Es recomendable reforzar prudencia y margen financiero.";
+}
+
+function pchLecturaHipotecas(variacion) {
+  const n = toNumber(variacion);
+
+  if (n === null) {
+    return {
+      color: "gris",
+      texto: "No se dispone de evolución reciente de hipotecas."
+    };
+  }
+
+  if (n > 5) {
+    return {
+      color: "verde",
+      texto: "Las hipotecas aumentan de forma significativa. Puede reflejar una actividad financiadora más dinámica."
+    };
+  }
+
+  if (n >= -5) {
+    return {
+      color: "naranja",
+      texto: "Las hipotecas permanecen relativamente estables."
+    };
+  }
+
+  return {
+    color: "rojo",
+    texto: "Las hipotecas disminuyen. El entorno aconseja una lectura prudente."
+  };
+}
+
+function pchGenerarOpinionHipoteca({
+  macroDecision,
+  contexto,
+  hipotecas,
+  mivau,
+  municipio,
+  provincia
+}) {
+  const datos = [];
+  let score = 50;
+
+  function add(nombre, valor, lectura, puntos, fuente) {
+    if (valor === null || valor === undefined || valor === "No disponible") return;
+
+    score += puntos;
+
+    datos.push({
+      nombre,
+      valor,
+      lectura,
+      puntos,
+      fuente
+    });
+  }
+
+  const bce = contexto?.bce?.tipos?.operaciones_principales?.valor ?? null;
+
+  if (bce !== null) {
+    add(
+      "Tipos oficiales BCE",
+      `${bce}%`,
+      pchLecturaTipoBCE(bce),
+      bce <= 2.5 ? 10 : bce <= 4 ? 2 : -10,
+      contexto?.bce?.fuente
+    );
+  }
+
+  const ipc = contexto?.ipc?.valor ?? null;
+
+  if (ipc !== null) {
+    add(
+      "IPC anual",
+      `${Number(ipc).toFixed(2)}%`,
+      ipc <= 2.5
+        ? "Inflación contenida."
+        : ipc <= 4
+        ? "Inflación moderada."
+        : "Inflación elevada.",
+      ipc <= 2.5 ? 6 : ipc <= 4 ? 0 : -6,
+      contexto?.ipc?.fuente
+    );
+  }
+
+  const pib = contexto?.pib?.variacion_anual ?? contexto?.pib?.valor ?? null;
+
+  if (pib !== null) {
+    add(
+      "PIB variación anual",
+      `${Number(pib).toFixed(2)}%`,
+      pib > 2
+        ? "Economía expansiva."
+        : pib >= 0
+        ? "Crecimiento moderado."
+        : "Desaceleración económica.",
+      pib > 2 ? 6 : pib >= 0 ? 1 : -6,
+      contexto?.pib?.fuente
+    );
+  }
+
+  const paroProv = contexto?.paro_provincia?.valor ?? null;
+
+  if (paroProv !== null) {
+    add(
+      "Paro provincial",
+      `${Number(paroProv).toFixed(2)}%`,
+      paroProv <= 8
+        ? "Mercado laboral sólido."
+        : paroProv <= 14
+        ? "Mercado laboral intermedio."
+        : "Mercado laboral sensible.",
+      paroProv <= 8 ? 8 : paroProv <= 14 ? 0 : -8,
+      contexto?.paro_provincia?.fuente
+    );
+  }
+
+  const hipVar = hipotecas?.variacion ?? null;
+  const hipLectura = pchLecturaHipotecas(hipVar);
+
+  if (hipotecas?.estado_dato === "OK") {
+    add(
+      "Hipotecas sobre viviendas",
+      `${hipotecas.actual} hipotecas · ${hipVar > 0 ? "+" : ""}${Number(hipVar).toFixed(2)}%`,
+      hipotecas.lectura || hipLectura.texto,
+      hipLectura.color === "verde" ? 8 : hipLectura.color === "naranja" ? 1 : -8,
+      hipotecas?.fuente
+    );
+  }
+
+  const macroScore = macroDecision?.score ?? null;
+
+  if (macroScore !== null) {
+    add(
+      "Motor macroeconómico",
+      `${macroScore}/100`,
+      macroDecision?.interpretacion || "Lectura macroeconómica agregada.",
+      macroScore >= 75 ? 8 : macroScore >= 50 ? 1 : -8,
+      macroDecision?.fuente
+    );
+  }
+
+  const valorMivau = mivau?.ultimo?.valor_tasado_total ?? null;
+
+  if (valorMivau !== null) {
+    add(
+      "Valor tasado MIVAU",
+      `${Number(valorMivau).toFixed(0)} €/m²`,
+      "Referencia oficial MIVAU.",
+      2,
+      mivau?.fuente
+    );
+  }
+
+  score = Math.max(0, Math.min(100, Math.round(score)));
+
+  let opinion = "No hay datos suficientes para valorar el momento hipotecario.";
+  let resumen = "No se dispone de suficientes indicadores.";
+  let semaforo = {
+    color: "gris",
+    nivel: "Sin datos suficientes"
+  };
+
+  if (datos.length >= 4) {
+    if (score >= 70) {
+      opinion = "Buen momento relativo para hipotecarse";
+      resumen = "El contexto general acompaña razonablemente.";
+      semaforo = {
+        color: "verde",
+        nivel: "Contexto favorable"
+      };
+    } else if (score >= 45) {
+      opinion = "Momento prudente";
+      resumen = "La operación es estudiable, pero exige revisar bien cuota, vinculaciones y ahorro.";
+      semaforo = {
+        color: "naranja",
+        nivel: "Contexto prudente"
+      };
+    } else {
+      opinion = "Momento sensible";
+      resumen = "Conviene reforzar ahorro y margen financiero antes de asumir una operación ajustada.";
+      semaforo = {
+        color: "rojo",
+        nivel: "Contexto tensionado"
+      };
+    }
+  }
+
+  return {
+    score,
+    opinion,
+    resumen,
+    semaforo,
+    municipio,
+    provincia,
+    datos_usados: datos,
+    datos_suficientes: datos.length >= 4
+  };
+}
+
+app.get("/api/punto-control-hipoteca/contexto", async (req, res) => {
+  try {
+    const direccion = String(req.query.direccion || "").trim();
+
+    if (!direccion) {
+      return res.json(ok({
+        fuente: "Punto Control Hipoteca",
+        estado_dato: "NO_DISPONIBLE",
+        aviso: "Debe indicarse una dirección."
+      }));
+    }
+
+    const host = `${req.protocol}://${req.get("host")}`;
+
+    const geo = await pcvSafeGet(
+      `${host}/api/geo?direccion=${encodeURIComponent(direccion)}`
+    );
+
+    const geocoding = geo?.geocoding || null;
+
+    const municipio =
+      geocoding?.municipio ||
+      geocoding?.nombre ||
+      null;
+
+    const provincia =
+      geocoding?.provincia ||
+      geocoding?.comunidad ||
+      null;
+
+    const [
+      macroDecision,
+      contexto,
+      hipotecas,
+      mivau
+    ] = await Promise.all([
+      pcvSafeGet(`${host}/api/macro-decision`),
+      pcvSafeGet(`${host}/api/contexto-economico`),
+      provincia
+        ? pcvSafeGet(`${host}/api/ine/hipotecas?territorio=${encodeURIComponent(provincia)}`)
+        : pcvSafeGet(`${host}/api/ine/hipotecas`),
+      municipio
+        ? pcvSafeGet(`${host}/api/mivau/valor-tasado?municipio=${encodeURIComponent(municipio)}`)
+        : null
+    ]);
+
+    const opinion = pchGenerarOpinionHipoteca({
+      macroDecision,
+      contexto,
+      hipotecas,
+      mivau,
+      municipio,
+      provincia
+    });
+
+    return res.json(ok({
+      fuente: "Punto Control Hipoteca",
+      estado_dato: "OK",
+      direccion_solicitada: direccion,
+      municipio,
+      provincia,
+      geocoding,
+      opinion_hipotecaria: opinion,
+      datos_reales: {
+        macro_decision: macroDecision,
+        contexto_economico: contexto,
+        hipotecas,
+        mivau
+      },
+      aviso_consumidor: "Las conclusiones se generan exclusivamente con datos devueltos por las APIs disponibles."
+    }));
+  } catch (e) {
+    return res.json(fail("No se pudo generar el contexto hipotecario.", {
+      detalle: e.message
+    }));
   }
 });
 
